@@ -7,24 +7,6 @@
 - runtime 直接 spawn 已登录的 Qoder CLI，**不启动 HTTP 代理**，不改全局配置，不动现有 provider/model 的默认选择
 - 每条回答附带 Credits、Qoder session id，并写入无 prompt 的 JSONL 调用日志
 
-## 目录结构
-
-| 文件 | 作用 |
-| --- | --- |
-| `index.ts` | OpenCode 服务端插件。`Plugin.define` + `ctx.provider.transform` 注册 provider 与模型，`ctx.command.transform` 注册 `/qoder`，`ctx.aisdk.hook("sdk")` 把 provider runtime 交给 OpenCode，`ctx.rpc.register` 注册 `qoder` RPC |
-| `tui.ts` | OpenCode TUI 插件。注册 `/qoder` slash 命令，调用 `qoder` RPC 拿结果，用原生 dialog 显示 |
-| `rpc.ts` | RPC 契约：`qoder` id、`execute` 方法（`{text}` → `{text}`），server 与 TUI 共用 |
-| `provider.mjs` | provider runtime。导出 `createQoder(options)`，返回带 `languageModel(modelID)` 的 provider（AI SDK **LanguageModelV3**） |
-| `src/options.mjs` | 选项与默认值解析（CLI 路径、权限模式、超时、日志位置） |
-| `src/models.mjs` | Qoder 模型名 ↔ OpenCode 模型 ID 映射、目录解析 |
-| `src/prompt.mjs` | prompt 序列化（system/user/assistant/tool）与字节上限检查 |
-| `src/cli.mjs` | spawn Qoder CLI、stdin 写入、进程树终止、超时 |
-| `src/result.mjs` | CLI 结果 → AI SDK V3 结果、Credits 提取、回落检测 |
-| `src/logger.mjs` | JSONL 调用日志（无 prompt、无凭证） |
-| `src/catalog.mjs` | `--list-models` / `--version` 调用 |
-| `src/command.mjs` | `/qoder` 的子命令解析与状态/目录/登录文案（server 与 TUI 共用同一份） |
-
-OpenCode 通过 `aisdk:file://<绝对路径>/provider.mjs` 解析 provider；该模块导出 `createQoder(options)`，OpenCode 随后调用 `sdk.languageModel(modelID)`。
 
 ## 安装
 
@@ -71,7 +53,7 @@ qoderclicn login
 
 模型清单随账号变化，用 `/qoder refresh` 刷新。
 
-> **`/models` 里搜 provider 名搜不到**：上游 2.2.6 的模型选择器按**模型 ID/名称**过滤搜索文本，输入 `qoder` 会过滤掉全部结果。请直接清空搜索词浏览 `Qoder (Credits)` 分组，或搜模型名（如 `Fast`、`Auto`）。
+> **`/models` 里搜 provider 名搜不到**：上游 2.2.6 的原生模型选择器只按**模型标题/分类（title/category）**过滤搜索文本，不搜 provider 名，输入 `qoder` 会过滤掉全部结果。workaround：直接**清空搜索词**浏览 `Qoder (Credits)` 分组，或搜模型名（如 `Fast`、`Auto`、`Qwen3.8`）；派 Superagent 时 picker 里可以直接搜 `qoder` 选 `qoder/*` 模型。
 
 ## 在 Subagent 里用 qoder/auto
 
@@ -147,7 +129,10 @@ curl -u "opencode:<口令>" -X POST \
 | `cliPath` | `QODER_CLI_PATH` | 插件自带的 `node_modules/@qodercn-ai/qoderclicn/bundle/qoderclicn.js`，其次是 `PATH` 里的 `qoderclicn` | Qoder CLI 可执行文件 |
 | `permissionMode` | `QODER_PERMISSION_MODE` | `default` | 透传给 `--permission-mode`。可选：`default`、`accept_edits`、`bypass_permissions`、`dont_ask`、`auto`。默认是安全值 `default`（写文件/执行命令逐项确认）；`accept_edits`、`auto`、`dont_ask`、`bypass_permissions` 都会放宽 Qoder CLI 的确认门槛，属于**显式启用、风险自担**，非法取值会直接报错而不是退回默认值 |
 | `timeoutMs` | `QODER_TIMEOUT_MS` | `1800000`（30 分钟） | 单次调用超时，超时后终止整个进程树；非法值直接报错 |
+| `contextLimit` | — | `200000` | 推导近似 token 数用的上下文窗口（见「限制与已知问题」的近似说明），非法值直接报错 |
 | `logFile` | `QODER_LOG_FILE` | `${XDG_STATE_HOME:-~/.local/state}/opencode/qoder-provider/calls.jsonl` | JSONL 调用日志（目录 0700、文件 0600） |
+| `additionalDirs` | — | `[]` | 字符串数组，逐个映射为 `--add-dir <dir>`，把这些目录**扩大**进 Qoder 的工作区范围（扩权操作，路径写错不会报错只会扩错地方） |
+| `cliTools` | — | 不传（CLI 用自身默认） | 字符串数组映射为 `--tools <t>…`；传 `""`（空串）**禁用** Qoder CLI 全部内置工具；`["default"]` 恢复全部。传其他类型或数组里含空字符串会直接报错 |
 | — | — | `ctx.location.directory` | CLI 的 `--cwd`，取当前 OpenCode 工作目录 |
 
 示例（`opencode.jsonc`，OpenCode V2 的 `plugins` 数组写法；旧的 `plugin` 键已废弃）：
@@ -159,6 +144,7 @@ curl -u "opencode:<口令>" -X POST \
       "package": "opencode-qoder-provider",
       "options": {
         "cliPath": "/usr/local/bin/qoderclicn",
+        // 示例为放宽确认门槛的显式授权用法；不传时保持安全默认 `default`，写文件/执行命令逐项确认
         "permissionMode": "accept_edits",
         "timeoutMs": 1800000
       }
@@ -176,12 +162,12 @@ curl -u "opencode:<口令>" -X POST \
 ## 限制与已知问题
 
 - **stdin 体积上限**：`qoderclicn` 1.1.85 会把 stdin 截断到 **8388608 字节**（截断时只打印一行 warning）。本插件在 **7340032 字节（7 MiB）** 就直接报错 `PromptTooLargeError`，避免静默截断导致回答莫名其妙地少一截。
-- **上下文/输出上限是占位值**：模型元数据里的 `limit` 固定为 `{context: 200000, output: 32000}`，**不是 Qoder 实测上限**，仅用于让 OpenCode 的 UI 正常显示。
+- **上下文 token 展示值是近似推导**：Qoder CLI 的 `usage`/`modelUsage` token 计数恒为 0（OpenCode 因此显示不出 `tokens / % used` 指示）。插件在 token 计数缺失或为 0 且 `usage.context_usage_ratio` 有效（0<r≤1）时，按 `round(ratio × contextLimit)` 推导 `inputTokens.total`；真实非零 token 永远优先、不被覆盖。`contextLimit` 默认 200000、可配置（同时写入模型元数据的 `limit.context`，**不是 Qoder 实测上限**）；`providerMetadata.qoder` 记录 `contextUsageRatio` 与 `approximatedContextTokens` 标志标明该值为估算。
 - **只支持文本**：capabilities 为 `{tools: false, input: ["text"], output: ["text"]}`。prompt 里出现图片/文件会**明确报错**（`UnsupportedMediaError`），不会静默丢弃。
 - **不做 OpenCode 工具桥接**：OpenCode 的 tool schema 不会传给 Qoder，Qoder 用自己的原生 agent 工具在 `--cwd` 目录工作；因此 `tools` 标为 `false`。
 - **prompt 被拍平成纯文本**：system/user/assistant/tool 会被序列化成带 `[system]`/`[user]`/`[assistant]`/`[tool]` 前缀的文本（工具调用序列化为 JSON），角色语义会有损失。
 - **不传 `--input-format`**：CLI 1.1.85 校验 `--input-format=stream-json requires output-format=stream-json`，所以 prompt 只能以纯文本写 stdin。
-- **流式不是实时的**：Qoder CLI 只在整轮结束后输出结果，`doStream` 会在 CLI 返回后依次发 `stream-start`/`text-start`/`text-delta`/`text-end`/`finish`，首版不承诺逐 token 流式。
+- **流式**：`doStream` 用 `-o stream-json --include-partial-messages`（隐藏参数，1.1.85 bundle 实证）驱动 CLI，把 `content_block_delta` 的 `text_delta` 实时映射为 AI SDK `text-delta`，`thinking_delta` 映射为 `reasoning-delta`（不混入正文）；最终 `assistant` 事件不会重复输出已流式的文本；CLI 未产生任何 partial 事件时回退为整段输出。`doGenerate` 保持单文档 `-o json`。流中缺少 `result` 事件会明确失败。
 - **模型回落判定**：只有 CLI stderr 明确输出 `Model ... falling back to ...` 或 `Model ... using ... instead` 才认定为回落。`result.modelUsage` 的 key 只作为 `usageModelKey` / `usageModelKeys` 记录，不参与回落判定，也不冒充 `actualModel`；没有明确 stderr 时，`actualModel` 使用请求模型，DeepSeek-Flash 或 Fast 搭配 `modelUsage.auto` 不会产生警告或失败。
 - **明确回落处理**：`execute` 记录 Credits、session、错误状态、exitCode 与耗时后抛出 `ModelFallbackError`。`doGenerate` 拒绝该调用，`doStream` 发出 error part，均不返回成功结果、不自动重试。
 - **会话标题会额外调一次模型**：OpenCode 用会话模型生成会话标题，这是 OpenCode 自带行为、与插件无关，会多消耗一次 Credits。可在 OpenCode 配置里设 `small_model` 指向便宜的模型来避免。
@@ -189,6 +175,31 @@ curl -u "opencode:<口令>" -X POST \
 - 插件不修改任何全局默认模型，也不写入 Qoder 之外的目录。
 - **`/qoder` 同名命令有两处**：TUI 的 slash（keymap）与服务端命令。TUI 里 keymap 先接管，结果进 dialog、session inbox 不新增消息；非 TUI 客户端走服务端命令，结果进 session inbox。两条路径的回答内容一致。
 - **OpenCode 的 HTTP API 始终要求 basic auth**：`opencode serve` 会生成服务端口令（`OPENCODE_PASSWORD` 可指定），远程调用需要 `Authorization: Basic base64(opencode:<password>)`。这与本插件无关。
+
+## 安全
+
+- **不含凭证**：插件代码与仓库不包含任何密钥、token、凭据或真实调用日志；密钥只可能存在于本机的 Qoder CLI 登录态里，插件不读取、不转发、不落盘。
+- **日志脱敏**：`calls.jsonl` 只记录模型名、Credits/用量元数据与 session 标识，**不含 prompt、回答与任何凭证**；日志目录按 0700、文件按 0600 创建，对已存在的文件 best-effort 收紧权限。
+- **本地运行边界**：每次调用 spawn 本机已登录的 `qoderclicn` 子进程（本地进程，不外发请求、不启 HTTP 代理），工作区限定在 `--cwd`（当前 OpenCode 目录）；`additionalDirs`（`--add-dir`）与 `cliTools`（`--tools`）会改变这个边界——前者**扩大** Qoder 可写目录、属扩权操作，后者可用 `--tools ""` 完全禁用 Qoder 内置工具、收紧能力。超时/取消/中止都会终止整个子进程树（Windows 走 `taskkill /t /f`）。
+
+## 目录结构
+
+| 文件 | 作用 |
+| --- | --- |
+| `index.ts` | OpenCode 服务端插件。`Plugin.define` + `ctx.provider.transform` 注册 provider 与模型，`ctx.command.transform` 注册 `/qoder`，`ctx.aisdk.hook("sdk")` 把 provider runtime 交给 OpenCode，`ctx.rpc.register` 注册 `qoder` RPC |
+| `tui.ts` | OpenCode TUI 插件。注册 `/qoder` slash 命令，调用 `qoder` RPC 拿结果，用原生 dialog 显示 |
+| `rpc.ts` | RPC 契约：`qoder` id、`execute` 方法（`{text}` → `{text}`），server 与 TUI 共用 |
+| `provider.mjs` | provider runtime。导出 `createQoder(options)`，返回带 `languageModel(modelID)` 的 provider（AI SDK **LanguageModelV3**） |
+| `src/options.mjs` | 选项与默认值解析（CLI 路径、权限模式、超时、日志位置） |
+| `src/models.mjs` | Qoder 模型名 ↔ OpenCode 模型 ID 映射、目录解析 |
+| `src/prompt.mjs` | prompt 序列化（system/user/assistant/tool）与字节上限检查 |
+| `src/cli.mjs` | spawn Qoder CLI、stdin 写入、进程树终止、超时 |
+| `src/result.mjs` | CLI 结果 → AI SDK V3 结果、Credits 提取、回落检测 |
+| `src/logger.mjs` | JSONL 调用日志（无 prompt、无凭证） |
+| `src/catalog.mjs` | `--list-models` / `--version` 调用 |
+| `src/command.mjs` | `/qoder` 的子命令解析与状态/目录/登录文案（server 与 TUI 共用同一份） |
+
+OpenCode 通过 `aisdk:file://<绝对路径>/provider.mjs` 解析 provider；该模块导出 `createQoder(options)`，OpenCode 随后调用 `sdk.languageModel(modelID)`。
 
 ## 开发与测试
 

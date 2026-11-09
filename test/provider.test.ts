@@ -250,6 +250,24 @@ test("a hanging call is aborted by the timeout", async () => {
   }
 })
 
+test("additionalDirs and cliTools are passed through to the CLI argv", async () => {
+  const extra = join(tempDir(), "extra")
+  const { provider, dir } = makeProvider({ additionalDirs: [extra], cliTools: "" })
+  const model = provider.languageModel("Auto")
+  const record = join(dir, "record.json")
+  const previousRecord = process.env.FAKE_QODER_RECORD
+  process.env.FAKE_QODER_RECORD = record
+  try {
+    await model.doGenerate({ prompt: PROMPT })
+    const argv = (JSON.parse(readFileSync(record, "utf8")) as { argv: string[] }).argv
+    assert.equal(argv[argv.indexOf("--add-dir") + 1], extra)
+    assert.deepEqual(argv.slice(argv.indexOf("--tools")), ["--tools", ""])
+  } finally {
+    if (previousRecord === undefined) delete process.env.FAKE_QODER_RECORD
+    else process.env.FAKE_QODER_RECORD = previousRecord
+  }
+})
+
 test("an oversized prompt is rejected before the CLI is started", async () => {
   const { provider, logFile } = makeProvider()
   const model = provider.languageModel("Auto")
@@ -420,4 +438,133 @@ test("without an explicit permissionMode the CLI is pinned to the built-in defau
     else process.env.FAKE_QODER_RECORD = previousRecord
     if (previousPermission !== undefined) process.env.QODER_PERMISSION_MODE = previousPermission
   }
+})
+
+interface FakeEnvKeys {
+  FAKE_QODER_MODE?: string
+  FAKE_QODER_PID_FILE?: string
+  FAKE_QODER_RECORD?: string
+  FAKE_QODER_PARTIAL_DELAY_MS?: string
+  FAKE_QODER_ZERO_USAGE?: string
+  FAKE_QODER_CONTEXT_RATIO?: string
+}
+
+async function withFakeEnv(overrides: FakeEnvKeys, run: () => Promise<void>) {
+  const previous: FakeEnvKeys = {}
+  for (const key of Object.keys(overrides) as Array<keyof FakeEnvKeys>) {
+    previous[key] = process.env[key]
+    const value = overrides[key]
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+  try {
+    await run()
+  } finally {
+    for (const key of Object.keys(previous) as Array<keyof FakeEnvKeys>) {
+      if (previous[key] === undefined) delete process.env[key]
+      else process.env[key] = previous[key]
+    }
+  }
+}
+
+test("doStream forwards live text_delta partials without repeating the final text", async () => {
+  const { provider, dir } = makeProvider({ contextLimit: 100_000 })
+  const model = provider.languageModel("Auto")
+  const pidFile = join(dir, "cli.pid")
+  await withFakeEnv(
+    {
+      FAKE_QODER_MODE: "partial",
+      FAKE_QODER_PID_FILE: pidFile,
+      FAKE_QODER_PARTIAL_DELAY_MS: "80",
+      FAKE_QODER_ZERO_USAGE: "1",
+      FAKE_QODER_CONTEXT_RATIO: "0.5",
+    },
+    async () => {
+      const { stream } = await model.doStream({ prompt: PROMPT })
+      const reader = (stream as unknown as ReadableStream).getReader()
+      const parts: any[] = []
+      let cliAliveDuringFirstTextDelta = false
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        parts.push(value)
+        if (value.type === "text-delta" && !cliAliveDuringFirstTextDelta) {
+          // The delta must arrive while the CLI is still running (partials,
+          // not a post-mortem replay of the buffered output).
+          const pid = Number(readFileSync(pidFile, "utf8"))
+          try {
+            process.kill(pid, 0)
+            cliAliveDuringFirstTextDelta = true
+          } catch {}
+        }
+      }
+
+      assert.equal(cliAliveDuringFirstTextDelta, true, "the first text-delta arrived only after the CLI exited")
+      assert.deepEqual(
+        parts.map((part) => part.type),
+        [
+          "stream-start",
+          "reasoning-start",
+          "reasoning-delta",
+          "reasoning-end",
+          "text-start",
+          "text-delta",
+          "text-delta",
+          "text-end",
+          "finish",
+        ],
+      )
+      const text = parts.filter((part) => part.type === "text-delta").map((part) => part.delta).join("")
+      assert.equal(text, "ok: Auto")
+      const finish = parts[parts.length - 1]!
+      assert.equal(finish.finishReason.unified, "stop")
+      assert.equal(finish.usage.inputTokens.total, 50_000)
+      const metadata = finish.providerMetadata.qoder as Record<string, unknown>
+      assert.equal(metadata.contextUsageRatio, 0.5)
+      assert.equal(metadata.approximatedContextTokens, true)
+    },
+  )
+})
+
+test("doStream fails when the CLI stream never produces a result event", async () => {
+  const { provider, logFile } = makeProvider()
+  const model = provider.languageModel("Auto")
+  await withFakeEnv({ FAKE_QODER_MODE: "partial-no-result" }, async () => {
+    const { stream } = await model.doStream({ prompt: PROMPT })
+    const parts: any[] = []
+    for await (const part of stream as unknown as AsyncIterable<any>) parts.push(part)
+
+    assert.equal(parts[parts.length - 1]!.type, "error")
+    assert.match(String(parts[parts.length - 1]!.error.message), /without a result event/)
+    assert.equal(parts.some((part) => part.type === "finish"), false)
+
+    const logged = readLogged(logFile)
+    assert.equal(logged.length, 1)
+    assert.equal(logged[0]!.isError, true)
+  })
+})
+
+test("doGenerate keeps the single-document json mode without partial flags", async () => {
+  const { provider, dir } = makeProvider()
+  const model = provider.languageModel("Auto")
+  const record = join(dir, "record.json")
+  await withFakeEnv({ FAKE_QODER_MODE: "ok", FAKE_QODER_RECORD: record }, async () => {
+    await model.doGenerate({ prompt: PROMPT })
+    const argv = (JSON.parse(readFileSync(record, "utf8")) as { argv: string[] }).argv
+    assert.deepEqual(argv.slice(0, 3), ["-p", "-o", "json"])
+    assert.equal(argv.includes("--include-partial-messages"), false)
+    assert.equal(argv.includes("stream-json"), false)
+  })
+})
+
+test("doGenerate approximates zero token counters from usage.context_usage_ratio", async () => {
+  const { provider } = makeProvider({ contextLimit: 200_000 })
+  const model = provider.languageModel("Auto")
+  await withFakeEnv({ FAKE_QODER_MODE: "ok", FAKE_QODER_ZERO_USAGE: "1", FAKE_QODER_CONTEXT_RATIO: "0.034375" }, async () => {
+    const result = await model.doGenerate({ prompt: PROMPT })
+    assert.equal(result.usage.inputTokens.total, 6875)
+    const metadata = result.providerMetadata!.qoder as Record<string, unknown>
+    assert.equal(metadata.contextUsageRatio, 0.034375)
+    assert.equal(metadata.approximatedContextTokens, true)
+  })
 })

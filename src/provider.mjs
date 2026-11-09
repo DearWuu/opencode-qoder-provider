@@ -2,6 +2,7 @@ import { MAX_STDOUT_BYTES, buildCliArgs, parseCliResult, runCli } from "./cli.mj
 import { appendCallLog, buildLogEntry } from "./logger.mjs"
 import { assertPromptSize, serializePrompt } from "./prompt.mjs"
 import { ModelFallbackError, buildGenerateResult, detectFallback, summarizeModelUsage } from "./result.mjs"
+import { createStreamJsonParser } from "./stream.mjs"
 import { PROVIDER_ID, resolveOptions } from "./options.mjs"
 
 /**
@@ -15,8 +16,11 @@ import { PROVIDER_ID, resolveOptions } from "./options.mjs"
  * @param {string} [options.cliPath] Path to `qoderclicn` (default: bundled CLI, then `QODER_CLI_PATH`, then `PATH`).
  * @param {string} [options.permissionMode] Qoder CLI permission mode (default `default`).
  * @param {number} [options.timeoutMs] Per call timeout (default 30 minutes).
+ * @param {number} [options.contextLimit] Context window used to approximate token counts (default 200000).
  * @param {string} [options.logFile] JSONL call log path.
  * @param {string} [options.cwd] Working directory for the CLI run.
+ * @param {string[]} [options.additionalDirs] Extra directories passed as repeated `--add-dir`.
+ * @param {string[] | ""} [options.cliTools] Built-in tool allowlist (`--tools`), or `""` to disable all.
  * @returns {{ specificationVersion: "v3", provider: string, languageModel: (modelID: string) => any, chat: (modelID: string) => any }}
  */
 export function createQoder(options = {}) {
@@ -76,16 +80,53 @@ export function createLanguageModel(modelID, resolved) {
               controller.enqueue(chunk)
             } catch {}
           }
+          // Real partial streaming: the parser forwards `text_delta` events
+          // from the CLI as AI SDK `text-delta` parts while the process runs.
+          const openBlocks = new Map()
+          const openBlock = (kind, index) => {
+            const id = `qoder-${kind}-${index}`
+            openBlocks.set(index, { kind, id })
+            emit({ type: `${kind}-start`, id })
+          }
+          const deltaBlock = (kind, index, text) => {
+            let block = openBlocks.get(index)
+            if (!block) {
+              const id = `qoder-${kind}-${index}`
+              block = { kind, id }
+              openBlocks.set(index, block)
+              emit({ type: `${kind}-start`, id })
+            }
+            if (text.length > 0) emit({ type: `${kind}-delta`, id: block.id, delta: text })
+          }
+          const closeBlock = (index) => {
+            const block = openBlocks.get(index)
+            if (!block) return
+            openBlocks.delete(index)
+            emit({ type: `${block.kind}-end`, id: block.id })
+          }
+          const parser = createStreamJsonParser({
+            onTextStart: (index) => openBlock("text", index),
+            onTextDelta: (index, text) => deltaBlock("text", index, text),
+            onTextEnd: closeBlock,
+            onReasoningStart: (index) => openBlock("reasoning", index),
+            onReasoningDelta: (index, text) => deltaBlock("reasoning", index, text),
+            onReasoningEnd: closeBlock,
+          })
           emit({ type: "stream-start", warnings: [] })
           try {
-            const outcome = await execute({ modelID, resolved, prompt, signal: abortController.signal })
+            const outcome = await execute({ modelID, resolved, prompt, signal: abortController.signal, parser })
             if (cancelled) return
-            const text = outcome.result.content.map((part) => (part.type === "text" ? part.text : "")).join("")
-            emit({ type: "text-start", id: "qoder-text-0" })
-            if (text.length > 0) {
-              emit({ type: "text-delta", id: "qoder-text-0", delta: text })
+            if (!parser.sawTextDelta) {
+              // The CLI produced no partial events (older build): emit the
+              // finished text as one delta so the stream still delivers.
+              const text = outcome.result.content.map((part) => (part.type === "text" ? part.text : "")).join("")
+              emit({ type: "text-start", id: "qoder-text-0" })
+              if (text.length > 0) {
+                emit({ type: "text-delta", id: "qoder-text-0", delta: text })
+              }
+              emit({ type: "text-end", id: "qoder-text-0" })
             }
-            emit({ type: "text-end", id: "qoder-text-0" })
+            for (const index of [...openBlocks.keys()]) closeBlock(index)
             emit({
               type: "finish",
               usage: outcome.result.usage,
@@ -119,11 +160,14 @@ export function createLanguageModel(modelID, resolved) {
 }
 
 /** Run one Qoder CLI call and translate the result into the AI SDK V3 shape. */
-async function execute({ modelID, resolved, prompt, signal }) {
+async function execute({ modelID, resolved, prompt, signal, parser }) {
   const args = buildCliArgs({
     modelID,
     cwd: resolved.cwd,
     permissionMode: resolved.permissionMode,
+    additionalDirs: resolved.additionalDirs,
+    cliTools: resolved.cliTools,
+    stream: parser !== undefined,
   })
 
   const run = await runCli({
@@ -133,6 +177,7 @@ async function execute({ modelID, resolved, prompt, signal }) {
     cwd: resolved.cwd,
     timeoutMs: resolved.timeoutMs,
     signal,
+    onStdout: parser ? (chunk) => parser.feed(chunk) : undefined,
   })
 
   if (run.aborted) {
@@ -170,7 +215,13 @@ async function execute({ modelID, resolved, prompt, signal }) {
 
   let raw
   try {
-    raw = parseCliResult(run.stdout)
+    if (parser) {
+      parser.end()
+      raw = parser.result
+      if (!raw) throw new Error("The Qoder CLI stream ended without a result event.")
+    } else {
+      raw = parseCliResult(run.stdout)
+    }
   } catch (error) {
     logCall(resolved, {
       requestedModel: modelID,
@@ -199,7 +250,7 @@ async function execute({ modelID, resolved, prompt, signal }) {
 
   if (fallback.fellBack) throw new ModelFallbackError(modelID, fallback.actualModel)
 
-  const result = buildGenerateResult({ raw, requestedModel: modelID })
+  const result = buildGenerateResult({ raw, requestedModel: modelID, contextLimit: resolved.contextLimit })
   return { result, raw, run }
 }
 

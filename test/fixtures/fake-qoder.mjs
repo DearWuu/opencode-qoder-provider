@@ -11,14 +11,18 @@
  *  - FAKE_QODER_RECORD        path of the file that receives {argv, stdin, stdinBytes}
  *  - FAKE_QODER_PID_FILE      path of the file that receives the process pid
  *  - FAKE_QODER_MODE          ok | error | usage-auto | fallback | fallback-quoted |
- *                             hang | slow | huge-out | huge-err | not-json | crash
+ *                             hang | slow | partial | partial-no-result |
+ *                             huge-out | huge-err | not-json | crash
  *  - FAKE_QODER_MODELS        newline separated model list for --list-models
  *  - FAKE_QODER_DISCOVERY_DELAY_MS  ms to wait before answering --list-models
  *  - FAKE_QODER_LIST_OUT_BYTES      extra stdout padding bytes for --list-models
  *  - FAKE_QODER_DELAY_MS            ms `slow` waits before answering (default 5000)
+ *  - FAKE_QODER_PARTIAL_DELAY_MS    ms between emitted stream-json lines
  *  - FAKE_QODER_RESULT_FILE         written only when `slow` gets to answer
  *  - FAKE_QODER_OUT_BYTES           stdout padding for `huge-out`
  *  - FAKE_QODER_ERR_BYTES           stderr padding for `huge-err`
+ *  - FAKE_QODER_ZERO_USAGE          set: every token counter in the result is 0
+ *  - FAKE_QODER_CONTEXT_RATIO       set usage.context_usage_ratio to this value
  */
 import { writeFileSync } from "node:fs"
 
@@ -61,6 +65,16 @@ function positiveNumberEnv(name) {
 
 function resultPayload(requested) {
   const actual = ["usage-auto", "fallback", "fallback-quoted"].includes(mode) ? "auto" : requested.toLowerCase()
+  const tokens = process.env.FAKE_QODER_ZERO_USAGE ? 0 : 10
+  const outTokens = process.env.FAKE_QODER_ZERO_USAGE ? 0 : 5
+  const ratio = positiveNumberEnv("FAKE_QODER_CONTEXT_RATIO")
+  const usage = {
+    input_tokens: tokens,
+    output_tokens: outTokens,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+  }
+  if (ratio > 0) usage.context_usage_ratio = ratio
   return {
     type: "result",
     subtype: "success",
@@ -72,16 +86,11 @@ function resultPayload(requested) {
     stop_reason: "end_turn",
     total_cost_usd: 0,
     total_credits: 0.25,
-    usage: {
-      input_tokens: 10,
-      output_tokens: 5,
-      cache_read_input_tokens: 0,
-      cache_creation_input_tokens: 0,
-    },
+    usage,
     modelUsage: {
       [actual]: {
-        inputTokens: 10,
-        outputTokens: 5,
+        inputTokens: tokens,
+        outputTokens: outTokens,
         cacheReadInputTokens: 0,
         cacheCreationInputTokens: 0,
         costUSD: 0,
@@ -95,6 +104,27 @@ function resultPayload(requested) {
     uuid: "fake-uuid",
     session_id: "fake-session",
   }
+}
+
+/**
+ * `-o stream-json --include-partial-messages` transcript: system init, a
+ * thinking block, a text block split into several deltas, the full assistant
+ * message (which repeats the text), a non-JSON noise line and the result.
+ */
+function streamJsonLines(requested) {
+  const text = `ok: ${requested}`
+  const lines = [
+    { type: "system", subtype: "init", qodercli_version: "1.1.85" },
+    { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "thinking" } } },
+    { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "hmm" } } },
+    { type: "stream_event", event: { type: "content_block_stop", index: 0 } },
+    { type: "stream_event", event: { type: "content_block_start", index: 1, content_block: { type: "text" } } },
+    { type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: text.slice(0, 4) } } },
+    { type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: text.slice(4) } } },
+    { type: "stream_event", event: { type: "content_block_stop", index: 1 } },
+    { type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } },
+  ]
+  return lines
 }
 
 /** Resolve once everything queued on the stream has been flushed to the pipe. */
@@ -145,6 +175,24 @@ if (argv.includes("--list-models")) {
         process.stdout.write(JSON.stringify(resultPayload(argValue("--model") ?? "Auto")) + "\n")
         process.exit(0)
       }, delay)
+      return
+    }
+    if (mode === "partial" || mode === "partial-no-result") {
+      void (async () => {
+        const delay = positiveNumberEnv("FAKE_QODER_PARTIAL_DELAY_MS")
+        const wait = async () => {
+          if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay))
+        }
+        for (const line of streamJsonLines(argValue("--model") ?? "Auto")) {
+          process.stdout.write(`${JSON.stringify(line)}\n`)
+          await wait()
+        }
+        process.stdout.write("this line is not json\n")
+        await wait()
+        if (mode === "partial") process.stdout.write(`${JSON.stringify(resultPayload(argValue("--model") ?? "Auto"))}\n`)
+        await flush(process.stdout)
+        process.exit(0)
+      })()
       return
     }
     if (mode === "huge-err") {

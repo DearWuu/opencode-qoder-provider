@@ -13,15 +13,26 @@ export const MAX_STDERR_BYTES = 8 * 1024
  * well ("--input-format=stream-json requires output-format=stream-json.").
  * The prompt is therefore written to stdin as plain text.
  *
- * @param {{ modelID?: string, cwd?: string, permissionMode?: string }} [options]
+ * `stream: true` switches to `-o stream-json --include-partial-messages`
+ * (hidden flag, verified against the 1.1.85 bundle): the CLI then prints
+ * line-delimited JSON events with real `text_delta` partials.
+ *
+ * @param {{ modelID?: string, cwd?: string, permissionMode?: string, additionalDirs?: string[], cliTools?: string[] | "", stream?: boolean }} [options]
  * @returns {string[]}
  */
-export function buildCliArgs({ modelID, cwd, permissionMode } = {}) {
-  const args = ["-p", "-o", "json"]
+export function buildCliArgs({ modelID, cwd, permissionMode, additionalDirs, cliTools, stream } = {}) {
+  const args = stream
+    ? ["-p", "-o", "stream-json", "--include-partial-messages"]
+    : ["-p", "-o", "json"]
   if (permissionMode) args.push("--permission-mode", permissionMode)
   args.push("--no-session-persistence")
   if (cwd) args.push("--cwd", cwd)
   if (modelID) args.push("--model", modelID)
+  for (const dir of additionalDirs ?? []) args.push("--add-dir", dir)
+  // `--tools` is variadic in the CLI and must stay last: it consumes every
+  // following bare argument as a tool name.
+  if (Array.isArray(cliTools) && cliTools.length > 0) args.push("--tools", ...cliTools)
+  else if (cliTools === "") args.push("--tools", "")
   return args
 }
 
@@ -35,10 +46,11 @@ export function buildCliArgs({ modelID, cwd, permissionMode } = {}) {
  * @param {string} [options.cwd] Working directory of the CLI process.
  * @param {number} [options.timeoutMs] Kill the process tree after this many ms.
  * @param {AbortSignal} [options.signal] Aborts the run and kills the process tree.
+ * @param {(chunk: Buffer) => void} [options.onStdout] Called for every raw stdout chunk, before the byte cap applies.
  * @param {Record<string, string | undefined>} [options.env]
  * @returns {Promise<{ code: number|null, stdout: string, stderr: string, durationMs: number, timedOut: boolean, aborted: boolean, stdoutTruncated: boolean, stderrTruncated: boolean }>}
  */
-export function runCli({ cliPath, args, input, cwd, timeoutMs, signal, env = process.env } = {}) {
+export function runCli({ cliPath, args, input, cwd, timeoutMs, signal, onStdout, env = process.env } = {}) {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now()
     let child
@@ -89,6 +101,13 @@ export function runCli({ cliPath, args, input, cwd, timeoutMs, signal, env = pro
     }
 
     child.stdout.on("data", (chunk) => {
+      if (onStdout) {
+        try {
+          onStdout(chunk)
+        } catch {
+          // A broken stream consumer must not crash the raw capture.
+        }
+      }
       const kept = Math.min(chunk.length, MAX_STDOUT_BYTES - stdoutBytes)
       if (kept > 0) {
         chunk.copy(stdoutBuffer, stdoutBytes, 0, kept)

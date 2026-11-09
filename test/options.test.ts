@@ -44,3 +44,31 @@ test("the built-in default permission mode is the safe `default`", () => {
   if (builtInDefault !== "default") return
   assert.equal(builtInDefault, "default")
 })
+
+test("additionalDirs defaults to empty and rejects malformed values", () => {
+  assert.deepEqual(resolveOptions({}, {}).additionalDirs, [])
+  assert.deepEqual(resolveOptions({ additionalDirs: ["/data/inbox", " /data/out "] }, {}).additionalDirs, [
+    "/data/inbox",
+    "/data/out",
+  ])
+  assert.throws(() => resolveOptions({ additionalDirs: "/data" }, {}), /Invalid additionalDirs/)
+  assert.throws(() => resolveOptions({ additionalDirs: ["", "ok"] }, {}), /Invalid additionalDirs/)
+  assert.throws(() => resolveOptions({ additionalDirs: [42] }, {}), /Invalid additionalDirs/)
+})
+
+test("cliTools accepts a tool list or the empty disable-all string", () => {
+  assert.equal(resolveOptions({}, {}).cliTools, undefined)
+  assert.deepEqual(resolveOptions({ cliTools: ["Read", "Grep"] }, {}).cliTools, ["Read", "Grep"])
+  assert.equal(resolveOptions({ cliTools: "" }, {}).cliTools, "")
+  assert.throws(() => resolveOptions({ cliTools: "Read" }, {}), /Invalid cliTools "Read"/)
+  assert.throws(() => resolveOptions({ cliTools: 42 }, {}), /Invalid cliTools/)
+  assert.throws(() => resolveOptions({ cliTools: ["Read", ""] }, {}), /Invalid cliTools/)
+})
+
+test("contextLimit defaults to 200000 and rejects malformed values", () => {
+  assert.equal(resolveOptions({}, {}).contextLimit, 200_000)
+  assert.equal(resolveOptions({ contextLimit: "131072" }, {}).contextLimit, 131_072)
+  for (const bad of [0, -1, "abc", {}, Number.NaN]) {
+    assert.throws(() => resolveOptions({ contextLimit: bad }, {}), /Invalid contextLimit/)
+  }
+})

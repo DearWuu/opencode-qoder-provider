@@ -24,8 +24,23 @@ export function summarizeModelUsage(raw) {
     outputTokens: outputTotal,
     cacheRead,
     cacheWrite,
+    contextUsageRatio: readContextUsageRatio(raw),
     modelUsage,
   }
+}
+
+/**
+ * Read `usage.context_usage_ratio` (fallback: top level). The CLI 1.1.85 sets
+ * every token counter to 0 but keeps this ratio truthful.
+ *
+ * @param {any} raw
+ * @returns {number|undefined} a ratio in (0, 1], undefined when absent or invalid
+ */
+export function readContextUsageRatio(raw) {
+  for (const value of [raw?.usage?.context_usage_ratio, raw?.context_usage_ratio]) {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0 && value <= 1) return value
+  }
+  return undefined
 }
 
 const FALLBACK_PATTERNS = [
@@ -54,16 +69,35 @@ export class ModelFallbackError extends Error {
   }
 }
 
+/**
+ * Resolve the input-token total shown to the UI.
+ * Real non-zero counters win; a missing/zero counter plus a valid
+ * `context_usage_ratio` yields an approximation of `ratio * contextLimit`.
+ *
+ * @param {{ inputTokens?: number, contextUsageRatio?: number }} summary
+ * @param {number} contextLimit
+ * @returns {{ total: number|undefined, approximated: boolean }}
+ */
+export function resolveInputTokens(summary, contextLimit) {
+  const real = summary.inputTokens
+  if (real !== undefined && real > 0) return { total: real, approximated: false }
+  if (summary.contextUsageRatio !== undefined && Number.isFinite(contextLimit) && contextLimit > 0) {
+    return { total: Math.round(summary.contextUsageRatio * contextLimit), approximated: true }
+  }
+  return { total: real, approximated: false }
+}
+
 /** Build the AI SDK V3 usage block (nested input/output token counters). */
-export function buildUsage(raw) {
+export function buildUsage(raw, { contextLimit } = {}) {
   const summary = summarizeModelUsage(raw)
   const usage = raw?.usage && typeof raw.usage === "object" ? raw.usage : {}
+  const input = resolveInputTokens(summary, contextLimit)
 
   return {
     inputTokens: {
-      total: summary.inputTokens,
-      noCache: summary.inputTokens !== undefined && summary.cacheRead !== undefined
-        ? Math.max(0, summary.inputTokens - summary.cacheRead)
+      total: input.total,
+      noCache: input.total !== undefined && summary.cacheRead !== undefined
+        ? Math.max(0, input.total - summary.cacheRead)
         : undefined,
       cacheRead: summary.cacheRead,
       cacheWrite: summary.cacheWrite,
@@ -78,8 +112,12 @@ export function buildUsage(raw) {
 }
 
 /** Build `providerMetadata.qoder` from the CLI result. */
-export function buildProviderMetadata({ raw, requestedModel, fallback = undefined }) {
+/**
+ * @param {{ raw: any, requestedModel: string, fallback?: { actualModel?: string, fellBack?: boolean }, contextLimit?: number }} params
+ */
+export function buildProviderMetadata({ raw, requestedModel, fallback = undefined, contextLimit = undefined }) {
   const summary = summarizeModelUsage(raw)
+  const input = resolveInputTokens(summary, contextLimit)
   const metadata = {
     sessionId: raw?.session_id,
     uuid: raw?.uuid,
@@ -92,6 +130,8 @@ export function buildProviderMetadata({ raw, requestedModel, fallback = undefine
     usageModelKey: summary.usageModelKey,
     usageModelKeys: summary.usageModelKeys,
     modelUsage: summary.modelUsage,
+    contextUsageRatio: summary.contextUsageRatio,
+    approximatedContextTokens: input.approximated,
     permissionDenials: Array.isArray(raw?.permission_denials) ? raw.permission_denials : [],
     durationMs: numberOrUndefined(raw?.duration_ms),
     numTurns: numberOrUndefined(raw?.num_turns),
@@ -105,7 +145,7 @@ export function buildProviderMetadata({ raw, requestedModel, fallback = undefine
  * Convert a raw CLI result into an AI SDK V3 generate result.
  * Explicit fallbacks are rejected by `execute` before reaching this conversion.
  */
-export function buildGenerateResult({ raw, requestedModel }) {
+export function buildGenerateResult({ raw, requestedModel, contextLimit }) {
   const isError = raw?.is_error === true
   const text = typeof raw?.result === "string" ? raw.result : ""
 
@@ -115,10 +155,10 @@ export function buildGenerateResult({ raw, requestedModel }) {
       unified: isError ? "error" : "stop",
       raw: typeof raw?.stop_reason === "string" ? raw.stop_reason : isError ? "error" : "end_turn",
     },
-    usage: buildUsage(raw),
+    usage: buildUsage(raw, { contextLimit }),
     warnings: [],
     providerMetadata: {
-      qoder: buildProviderMetadata({ raw, requestedModel }),
+      qoder: buildProviderMetadata({ raw, requestedModel, contextLimit }),
     },
   }
 }

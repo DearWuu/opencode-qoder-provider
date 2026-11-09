@@ -32,6 +32,34 @@ test("buildCliArgs never passes --input-format", () => {
   assert.equal(args.some((arg) => arg.startsWith("--input-format")), false)
 })
 
+test("buildCliArgs appends --add-dir once per directory", () => {
+  const args = buildCliArgs({ modelID: "Auto", additionalDirs: ["/data/inbox", "/data/outbox"] })
+  assert.deepEqual(args, [
+    "-p",
+    "-o",
+    "json",
+    "--no-session-persistence",
+    "--model",
+    "Auto",
+    "--add-dir",
+    "/data/inbox",
+    "--add-dir",
+    "/data/outbox",
+  ])
+})
+
+test("buildCliArgs keeps the variadic --tools flag last", () => {
+  const list = buildCliArgs({ modelID: "Auto", additionalDirs: ["/extra"], cliTools: ["Read", "Grep"] })
+  assert.deepEqual(list.slice(list.indexOf("--tools")), ["--tools", "Read", "Grep"])
+  assert.equal(list.includes("--add-dir"), true)
+
+  const disabled = buildCliArgs({ cliTools: "" })
+  assert.deepEqual(disabled.slice(disabled.indexOf("--tools")), ["--tools", ""])
+
+  assert.equal(buildCliArgs({ cliTools: [] }).includes("--tools"), false)
+  assert.equal(buildCliArgs({ additionalDirs: [] }).includes("--add-dir"), false)
+})
+
 test("the CLI receives the prompt as plain text on stdin", async () => {
   const dir = tempDir()
   const record = join(dir, "record.json")
@@ -164,4 +192,32 @@ test("killTree falls back to child.kill when spawning taskkill throws", () => {
   })
 
   assert.deepEqual(signals, ["SIGKILL"])
+})
+
+test("buildCliArgs in stream mode switches to stream-json with partial messages", () => {
+  const args = buildCliArgs({ modelID: "Auto", cwd: "/tmp/work", permissionMode: "default", stream: true })
+  assert.deepEqual(args.slice(0, 5), ["-p", "-o", "stream-json", "--include-partial-messages", "--permission-mode"])
+  assert.equal(args.includes("json"), false)
+})
+
+test("buildCliArgs without stream mode keeps the single-document json output", () => {
+  const args = buildCliArgs({ modelID: "Auto" })
+  assert.deepEqual(args.slice(0, 3), ["-p", "-o", "json"])
+  assert.equal(args.includes("--include-partial-messages"), false)
+})
+
+test("runCli forwards every stdout chunk to onStdout as they arrive", async () => {
+  const dir = tempDir()
+  const chunks: Buffer[] = []
+  const run = await runCli({
+    cliPath: FAKE_CLI,
+    args: ["--list-models"],
+    cwd: dir,
+    timeoutMs: 20_000,
+    env: { ...process.env, FAKE_QODER_MODELS: "Auto\nFast" },
+    onStdout: (chunk) => chunks.push(Buffer.from(chunk)),
+  })
+  assert.equal(run.code, 0)
+  assert.ok(chunks.length >= 1)
+  assert.equal(Buffer.concat(chunks).toString("utf8"), run.stdout)
 })

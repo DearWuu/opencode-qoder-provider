@@ -16,6 +16,13 @@ export const ALLOWED_PERMISSION_MODES = ["default", "accept_edits", "bypass_perm
 export const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
 
 /**
+ * Context window used to approximate token counts from
+ * `usage.context_usage_ratio` (the CLI reports zero token counters).
+ * Overridable via the `contextLimit` option.
+ */
+export const DEFAULT_CONTEXT_LIMIT = 200_000
+
+/**
  * Hard limit of `qoderclicn` 1.1.85 stdin: the CLI truncates the piped prompt at
  * 8388608 bytes and only prints a warning ("Warning: stdin input truncated to
  * 8388608 bytes."). See `atr()` in the CLI bundle.
@@ -59,7 +66,7 @@ export function bundledCliPath(root = PACKAGE_ROOT) {
  *
  * @param {Record<string, any>} [raw]
  * @param {Record<string, string | undefined>} [env]
- * @returns {{ cliPath: string, permissionMode: string, timeoutMs: number, logFile: string, cwd: string|undefined }}
+ * @returns {{ cliPath: string, permissionMode: string, timeoutMs: number, contextLimit: number, logFile: string, cwd: string|undefined, additionalDirs: string[], cliTools: string[]|""|undefined }}
  */
 export function resolveOptions(raw = {}, env = process.env) {
   const cliPath =
@@ -84,14 +91,42 @@ export function resolveOptions(raw = {}, env = process.env) {
     throw new Error(`Invalid timeoutMs "${String(configuredTimeout)}". Expected a positive number.`)
   }
 
+  const configuredContextLimit = raw.contextLimit ?? DEFAULT_CONTEXT_LIMIT
+  const contextLimit = typeof configuredContextLimit === "string" && configuredContextLimit.trim().length > 0
+    ? Number(configuredContextLimit)
+    : configuredContextLimit
+  if (typeof contextLimit !== "number" || !Number.isFinite(contextLimit) || contextLimit <= 0) {
+    throw new Error(`Invalid contextLimit "${String(configuredContextLimit)}". Expected a positive number.`)
+  }
+
   const logFile = firstString(raw.logFile) ?? firstString(env.QODER_LOG_FILE) ?? defaultLogFile(env)
+
+  const additionalDirs = raw.additionalDirs ?? []
+  if (!Array.isArray(additionalDirs) || !additionalDirs.every((dir) => firstString(dir) !== undefined)) {
+    throw new Error("Invalid additionalDirs. Expected an array of non-empty directory paths.")
+  }
+
+  const cliTools = raw.cliTools ?? undefined
+  if (cliTools !== undefined && cliTools !== "" && !Array.isArray(cliTools)) {
+    throw new Error(
+      `Invalid cliTools "${String(cliTools)}". Expected an array of tool names or "" to disable all Qoder internal tools.`,
+    )
+  }
+  if (Array.isArray(cliTools) && !cliTools.every((tool) => firstString(tool) !== undefined)) {
+    throw new Error(
+      `Invalid cliTools. Expected an array of non-empty tool names or "" to disable all Qoder internal tools.`,
+    )
+  }
 
   return {
     cliPath,
     permissionMode,
     timeoutMs,
+    contextLimit,
     logFile,
     cwd: firstString(raw.cwd),
+    additionalDirs: Array.isArray(additionalDirs) ? additionalDirs.map((dir) => String(dir).trim()) : [],
+    cliTools,
   }
 }
 

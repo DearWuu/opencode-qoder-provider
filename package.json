@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "description": "OpenCode provider plugin that routes model calls to the Qoder CLI (provider: Qoder (Credits)).",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DearWuu/opencode-qoder-provider"
+  },
   "type": "module",
   "exports": {
     "./server": "./index.ts",

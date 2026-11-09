@@ -106,7 +106,7 @@ export const QoderProviderPlugin = Plugin.define({
     await ctx.provider.transform((editor) => {
       editor.add({
         info: buildProviderInfo(providerPackage),
-        models: buildModelInfos(catalog, providerPackage),
+        models: buildModelInfos(catalog, providerPackage, options.contextLimit),
       })
     })
 
@@ -153,7 +153,7 @@ function buildProviderInfo(providerPackage: string): Provider.Info {
   } as unknown as Provider.Info
 }
 
-function buildModelInfos(catalog: CatalogEntry[], providerPackage: string): Model.Info[] {
+function buildModelInfos(catalog: CatalogEntry[], providerPackage: string, contextLimit: number): Model.Info[] {
   return catalog.map((entry) => ({
     id: entry.id,
     modelID: entry.modelID,
@@ -166,7 +166,7 @@ function buildModelInfos(catalog: CatalogEntry[], providerPackage: string): Mode
     cost: [],
     status: "active",
     enabled: true,
-    limit: { context: 200_000, output: 32_000 },
+    limit: { context: contextLimit, output: 32_000 },
   })) as unknown as Model.Info[]
 }
 
