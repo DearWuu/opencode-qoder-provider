@@ -1,7 +1,14 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 
-import { buildProviderMetadata, buildUsage, detectFallback, summarizeModelUsage } from "../src/result.mjs"
+import {
+  buildGenerateResult,
+  buildProviderMetadata,
+  buildUsage,
+  detectFallback,
+  summarizeModelUsage,
+  toUnifiedFinishReason,
+} from "../src/result.mjs"
 
 test("modelUsage keys stay separate from the requested actualModel", () => {
   const raw = {
@@ -89,4 +96,61 @@ test("buildUsage without tokens and without a ratio stays at zero", () => {
   const metadata = buildProviderMetadata({ raw, requestedModel: "Auto", contextLimit: 200_000 })
   assert.equal("contextUsageRatio" in metadata, false)
   assert.equal(metadata.approximatedContextTokens, false)
+})
+
+test("summarizeModelUsage picks the entry with credits or tokens over the first all-zero key", () => {
+  // Real-world shape: Auto accounting emits an all-zero `auto` entry first,
+  // the actual usage sits under `fast` with credits.
+  const raw = {
+    total_credits: 0.129,
+    usage: { input_tokens: 0, output_tokens: 0 },
+    modelUsage: {
+      auto: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, credits: 0 },
+      fast: { inputTokens: 9406, outputTokens: 119, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, credits: 0.129 },
+    },
+  }
+  const summary = summarizeModelUsage(raw)
+  assert.equal(summary.usageModelKey, "fast")
+  assert.deepEqual(summary.usageModelKeys, ["auto", "fast"])
+  assert.equal(summary.credits, 0.129)
+  assert.equal(summary.inputTokens, 9406)
+  assert.equal(summary.outputTokens, 119)
+
+  const metadata = buildProviderMetadata({ raw, requestedModel: "Auto" })
+  assert.equal(metadata.usageModelKey, "fast")
+  assert.equal(metadata.modelCredits, 0.129)
+})
+
+test("summarizeModelUsage keeps the first key when no entry carries usage", () => {
+  const raw = {
+    modelUsage: {
+      auto: { inputTokens: 0, outputTokens: 0, credits: 0 },
+      fast: { inputTokens: 0, outputTokens: 0, credits: 0 },
+    },
+  }
+  const summary = summarizeModelUsage(raw)
+  assert.equal(summary.usageModelKey, "auto")
+  assert.equal(summary.credits, 0)
+})
+
+test("summarizeModelUsage also selects an entry with only non-zero tokens", () => {
+  const raw = {
+    modelUsage: {
+      auto: { inputTokens: 0, outputTokens: 0, credits: 0 },
+      fast: { inputTokens: 12, outputTokens: 0, credits: 0 },
+    },
+  }
+  assert.equal(summarizeModelUsage(raw).usageModelKey, "fast")
+})
+
+test("finishReason maps max_tokens and max-output-tokens to the unified length reason", () => {
+  const result = buildGenerateResult({ raw: { is_error: false, result: "cut", stop_reason: "max_tokens" }, requestedModel: "Auto", contextLimit: 200_000 })
+  assert.deepEqual(result.finishReason, { unified: "length", raw: "max_tokens" })
+
+  const hyphenated = buildGenerateResult({ raw: { is_error: false, result: "cut", stop_reason: "max-output-tokens" }, requestedModel: "Auto", contextLimit: 200_000 })
+  assert.deepEqual(hyphenated.finishReason, { unified: "length", raw: "max-output-tokens" })
+
+  assert.equal(toUnifiedFinishReason({ is_error: false, stop_reason: "end_turn" }), "stop")
+  assert.equal(toUnifiedFinishReason({ is_error: false }), "stop")
+  assert.equal(toUnifiedFinishReason({ is_error: true, stop_reason: "max_tokens" }), "error")
 })

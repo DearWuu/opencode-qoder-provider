@@ -17,10 +17,16 @@ export const MAX_STDERR_BYTES = 8 * 1024
  * (hidden flag, verified against the 1.1.85 bundle): the CLI then prints
  * line-delimited JSON events with real `text_delta` partials.
  *
- * @param {{ modelID?: string, cwd?: string, permissionMode?: string, additionalDirs?: string[], cliTools?: string[] | "", stream?: boolean }} [options]
+ * `cliTools` semantics: `undefined` leaves the CLI default tools active,
+ * `""` or `[]` disables every built-in tool (`--tools ""`), a non-empty
+ * array is an allowlist. `maxOutputTokens` is forwarded only when it is a
+ * positive integer; any other value is ignored (no flag) so a malformed
+ * caller value never breaks the call.
+ *
+ * @param {{ modelID?: string, cwd?: string, permissionMode?: string, additionalDirs?: string[], cliTools?: string[] | "", maxOutputTokens?: number, stream?: boolean }} [options]
  * @returns {string[]}
  */
-export function buildCliArgs({ modelID, cwd, permissionMode, additionalDirs, cliTools, stream } = {}) {
+export function buildCliArgs({ modelID, cwd, permissionMode, additionalDirs, cliTools, maxOutputTokens, stream } = {}) {
   const args = stream
     ? ["-p", "-o", "stream-json", "--include-partial-messages"]
     : ["-p", "-o", "json"]
@@ -28,11 +34,19 @@ export function buildCliArgs({ modelID, cwd, permissionMode, additionalDirs, cli
   args.push("--no-session-persistence")
   if (cwd) args.push("--cwd", cwd)
   if (modelID) args.push("--model", modelID)
+  if (Number.isInteger(maxOutputTokens) && maxOutputTokens > 0) {
+    args.push("--max-output-tokens", String(maxOutputTokens))
+  }
   for (const dir of additionalDirs ?? []) args.push("--add-dir", dir)
   // `--tools` is variadic in the CLI and must stay last: it consumes every
   // following bare argument as a tool name.
-  if (Array.isArray(cliTools) && cliTools.length > 0) args.push("--tools", ...cliTools)
-  else if (cliTools === "") args.push("--tools", "")
+  if (Array.isArray(cliTools)) {
+    // A non-empty array is an allowlist; an empty array disables every
+    // built-in tool, exactly like "".
+    args.push("--tools", ...(cliTools.length > 0 ? cliTools : [""]))
+  } else if (cliTools === "") {
+    args.push("--tools", "")
+  }
   return args
 }
 
@@ -47,10 +61,13 @@ export function buildCliArgs({ modelID, cwd, permissionMode, additionalDirs, cli
  * @param {number} [options.timeoutMs] Kill the process tree after this many ms.
  * @param {AbortSignal} [options.signal] Aborts the run and kills the process tree.
  * @param {(chunk: Buffer) => void} [options.onStdout] Called for every raw stdout chunk, before the byte cap applies.
+ * @param {boolean} [options.collectStdout=true] Keep a raw stdout copy. When false the 32 MiB capture
+ *   buffer is neither allocated nor decoded; `stdout` resolves to "" and only the
+ *   truncation flag keeps watching the byte count (onStdout still fires).
  * @param {Record<string, string | undefined>} [options.env]
  * @returns {Promise<{ code: number|null, stdout: string, stderr: string, durationMs: number, timedOut: boolean, aborted: boolean, stdoutTruncated: boolean, stderrTruncated: boolean }>}
  */
-export function runCli({ cliPath, args, input, cwd, timeoutMs, signal, onStdout, env = process.env } = {}) {
+export function runCli({ cliPath, args, input, cwd, timeoutMs, signal, onStdout, collectStdout = true, env = process.env } = {}) {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now()
     let child
@@ -67,7 +84,7 @@ export function runCli({ cliPath, args, input, cwd, timeoutMs, signal, onStdout,
     }
 
     // Fixed-capacity buffers bound retained memory even when one chunk exceeds a limit.
-    const stdoutBuffer = Buffer.allocUnsafe(MAX_STDOUT_BYTES)
+    const stdoutBuffer = collectStdout ? Buffer.allocUnsafe(MAX_STDOUT_BYTES) : undefined
     const stderrBuffer = Buffer.allocUnsafe(MAX_STDERR_BYTES)
     let stdoutBytes = 0
     let stderrBytes = 0
@@ -110,7 +127,7 @@ export function runCli({ cliPath, args, input, cwd, timeoutMs, signal, onStdout,
       }
       const kept = Math.min(chunk.length, MAX_STDOUT_BYTES - stdoutBytes)
       if (kept > 0) {
-        chunk.copy(stdoutBuffer, stdoutBytes, 0, kept)
+        if (stdoutBuffer) chunk.copy(stdoutBuffer, stdoutBytes, 0, kept)
         stdoutBytes += kept
       }
       if (kept < chunk.length) stdoutTruncated = true
@@ -138,7 +155,7 @@ export function runCli({ cliPath, args, input, cwd, timeoutMs, signal, onStdout,
       cleanup()
       resolve({
         code,
-        stdout: stdoutBuffer.subarray(0, stdoutBytes).toString("utf8"),
+        stdout: stdoutBuffer ? stdoutBuffer.subarray(0, stdoutBytes).toString("utf8") : "",
         stderr: stderrBuffer.subarray(0, stderrBytes).toString("utf8"),
         durationMs: Date.now() - startedAt,
         timedOut,

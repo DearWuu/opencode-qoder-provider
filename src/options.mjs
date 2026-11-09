@@ -75,7 +75,9 @@ export function resolveOptions(raw = {}, env = process.env) {
     bundledCliPath() ??
     "qoderclicn"
 
-  const configuredPermissionMode = raw.permissionMode ?? env.QODER_PERMISSION_MODE ?? DEFAULT_PERMISSION_MODE
+  // A blank environment value counts as unset (some launchers export empty
+  // strings); an explicit blank in the raw options is still a hard error.
+  const configuredPermissionMode = raw.permissionMode ?? firstString(env.QODER_PERMISSION_MODE) ?? DEFAULT_PERMISSION_MODE
   const permissionMode = typeof configuredPermissionMode === "string" ? configuredPermissionMode.trim() : configuredPermissionMode
   if (typeof permissionMode !== "string" || !ALLOWED_PERMISSION_MODES.includes(permissionMode)) {
     throw new Error(
@@ -83,7 +85,7 @@ export function resolveOptions(raw = {}, env = process.env) {
     )
   }
 
-  const configuredTimeout = raw.timeoutMs ?? env.QODER_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS
+  const configuredTimeout = raw.timeoutMs ?? firstString(env.QODER_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS
   const timeoutMs = typeof configuredTimeout === "string" && configuredTimeout.trim().length > 0
     ? Number(configuredTimeout)
     : configuredTimeout

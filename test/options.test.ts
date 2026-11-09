@@ -15,11 +15,28 @@ test("resolveOptions rejects an invalid permissionMode instead of falling back",
   assert.throws(() => resolveOptions({}, { QODER_PERMISSION_MODE: "nope" }), /Invalid permissionMode "nope"/)
 })
 
+test("a blank QODER_PERMISSION_MODE env value counts as unset", () => {
+  assert.equal(resolveOptions({}, { QODER_PERMISSION_MODE: "" }).permissionMode, DEFAULT_PERMISSION_MODE)
+  assert.equal(resolveOptions({}, { QODER_PERMISSION_MODE: "   " }).permissionMode, DEFAULT_PERMISSION_MODE)
+  assert.equal(resolveOptions({}, { QODER_PERMISSION_MODE: " " }).permissionMode, DEFAULT_PERMISSION_MODE)
+  // A non-blank env value still wins and is still validated.
+  assert.equal(resolveOptions({}, { QODER_PERMISSION_MODE: "accept_edits" }).permissionMode, "accept_edits")
+  assert.throws(() => resolveOptions({}, { QODER_PERMISSION_MODE: "nope" }), /Invalid permissionMode "nope"/)
+})
+
 test("resolveOptions rejects an invalid timeoutMs instead of falling back", () => {
   assert.throws(() => resolveOptions({ timeoutMs: 0 }, {}), /Invalid timeoutMs "0"/)
   assert.throws(() => resolveOptions({ timeoutMs: -5 }, {}), /Invalid timeoutMs "-5"/)
   assert.throws(() => resolveOptions({ timeoutMs: "abc" }, {}), /Invalid timeoutMs "abc"/)
   assert.throws(() => resolveOptions({ timeoutMs: "" }, {}), /Invalid timeoutMs/)
+  assert.throws(() => resolveOptions({}, { QODER_TIMEOUT_MS: "soon" }), /Invalid timeoutMs "soon"/)
+})
+
+test("a blank QODER_TIMEOUT_MS env value counts as unset", () => {
+  assert.equal(resolveOptions({}, { QODER_TIMEOUT_MS: "" }).timeoutMs, DEFAULT_TIMEOUT_MS)
+  assert.equal(resolveOptions({}, { QODER_TIMEOUT_MS: "  " }).timeoutMs, DEFAULT_TIMEOUT_MS)
+  // A non-blank env value still wins and is still validated.
+  assert.equal(resolveOptions({}, { QODER_TIMEOUT_MS: "1500" }).timeoutMs, 1500)
   assert.throws(() => resolveOptions({}, { QODER_TIMEOUT_MS: "soon" }), /Invalid timeoutMs "soon"/)
 })
 

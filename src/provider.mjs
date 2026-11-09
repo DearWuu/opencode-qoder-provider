@@ -53,12 +53,19 @@ export function createLanguageModel(modelID, resolved) {
     async doGenerate(callOptions = {}) {
       const prompt = serializePrompt(callOptions.prompt)
       assertPromptSize(prompt)
-      const outcome = await execute({ modelID, resolved, prompt, signal: callOptions.abortSignal })
+      const outcome = await execute({
+        modelID,
+        resolved,
+        prompt,
+        signal: callOptions.abortSignal,
+        maxOutputTokens: callOptions.maxOutputTokens,
+      })
       return outcome.result
     },
     async doStream(callOptions = {}) {
       const prompt = serializePrompt(callOptions.prompt)
       assertPromptSize(prompt)
+      const maxOutputTokens = callOptions.maxOutputTokens
       const abortController = new AbortController()
       const externalSignal = callOptions.abortSignal
       let cancelled = false
@@ -114,17 +121,29 @@ export function createLanguageModel(modelID, resolved) {
           })
           emit({ type: "stream-start", warnings: [] })
           try {
-            const outcome = await execute({ modelID, resolved, prompt, signal: abortController.signal, parser })
+            const outcome = await execute({
+              modelID,
+              resolved,
+              prompt,
+              signal: abortController.signal,
+              parser,
+              maxOutputTokens,
+            })
             if (cancelled) return
             if (!parser.sawTextDelta) {
-              // The CLI produced no partial events (older build): emit the
-              // finished text as one delta so the stream still delivers.
+              // The CLI produced no text deltas (older build or an empty text
+              // block): close every block that is still open, then deliver the
+              // finished text as one fresh fallback block. The fallback id is
+              // unique: reusing a parser block id would emit a text-start for
+              // an id that was already closed (duplicate block sequence).
+              for (const index of [...openBlocks.keys()]) closeBlock(index)
+              const fallbackId = "qoder-text-fallback"
               const text = outcome.result.content.map((part) => (part.type === "text" ? part.text : "")).join("")
-              emit({ type: "text-start", id: "qoder-text-0" })
+              emit({ type: "text-start", id: fallbackId })
               if (text.length > 0) {
-                emit({ type: "text-delta", id: "qoder-text-0", delta: text })
+                emit({ type: "text-delta", id: fallbackId, delta: text })
               }
-              emit({ type: "text-end", id: "qoder-text-0" })
+              emit({ type: "text-end", id: fallbackId })
             }
             for (const index of [...openBlocks.keys()]) closeBlock(index)
             emit({
@@ -160,13 +179,14 @@ export function createLanguageModel(modelID, resolved) {
 }
 
 /** Run one Qoder CLI call and translate the result into the AI SDK V3 shape. */
-async function execute({ modelID, resolved, prompt, signal, parser }) {
+async function execute({ modelID, resolved, prompt, signal, parser, maxOutputTokens }) {
   const args = buildCliArgs({
     modelID,
     cwd: resolved.cwd,
     permissionMode: resolved.permissionMode,
     additionalDirs: resolved.additionalDirs,
     cliTools: resolved.cliTools,
+    maxOutputTokens,
     stream: parser !== undefined,
   })
 
@@ -177,6 +197,9 @@ async function execute({ modelID, resolved, prompt, signal, parser }) {
     cwd: resolved.cwd,
     timeoutMs: resolved.timeoutMs,
     signal,
+    // Stream mode consumes stdout through the parser callback; the raw byte
+    // capture (and its string decode) would be pure overhead there.
+    collectStdout: parser === undefined,
     onStdout: parser ? (chunk) => parser.feed(chunk) : undefined,
   })
 

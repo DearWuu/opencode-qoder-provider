@@ -56,8 +56,24 @@ test("buildCliArgs keeps the variadic --tools flag last", () => {
   const disabled = buildCliArgs({ cliTools: "" })
   assert.deepEqual(disabled.slice(disabled.indexOf("--tools")), ["--tools", ""])
 
-  assert.equal(buildCliArgs({ cliTools: [] }).includes("--tools"), false)
+  // An empty array disables every built-in tool, exactly like "".
+  assert.deepEqual(buildCliArgs({ cliTools: [] }).slice(-2), ["--tools", ""])
+  assert.equal(buildCliArgs({ cliTools: undefined }).includes("--tools"), false)
   assert.equal(buildCliArgs({ additionalDirs: [] }).includes("--add-dir"), false)
+})
+
+test("buildCliArgs forwards maxOutputTokens only for positive integers", () => {
+  assert.deepEqual(buildCliArgs({ modelID: "Auto", maxOutputTokens: 4096 }).slice(-2), [
+    "--max-output-tokens",
+    "4096",
+  ])
+  assert.deepEqual(buildCliArgs({ modelID: "Auto", maxOutputTokens: 1 }).slice(-2), ["--max-output-tokens", "1"])
+
+  // Invalid values are ignored: no flag, no broken CLI invocation.
+  for (const invalid of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "4096", null]) {
+    assert.equal(buildCliArgs({ modelID: "Auto", maxOutputTokens: invalid as never }).includes("--max-output-tokens"), false)
+  }
+  assert.equal(buildCliArgs({ modelID: "Auto" }).includes("--max-output-tokens"), false)
 })
 
 test("the CLI receives the prompt as plain text on stdin", async () => {
@@ -220,4 +236,42 @@ test("runCli forwards every stdout chunk to onStdout as they arrive", async () =
   assert.equal(run.code, 0)
   assert.ok(chunks.length >= 1)
   assert.equal(Buffer.concat(chunks).toString("utf8"), run.stdout)
+})
+
+test("runCli with collectStdout:false skips the raw capture but keeps onStdout", async () => {
+  const dir = tempDir()
+  const chunks: Buffer[] = []
+  const run = await runCli({
+    cliPath: FAKE_CLI,
+    args: ["--list-models"],
+    cwd: dir,
+    timeoutMs: 20_000,
+    env: { ...process.env, FAKE_QODER_MODELS: "Auto\nFast" },
+    collectStdout: false,
+    onStdout: (chunk) => chunks.push(Buffer.from(chunk)),
+  })
+  assert.equal(run.code, 0)
+  assert.ok(chunks.length >= 1)
+  // The stream consumer saw every byte; the raw copy was never decoded.
+  assert.match(Buffer.concat(chunks).toString("utf8"), /MODEL\nAuto\nFast/)
+  assert.equal(run.stdout, "")
+  assert.equal(run.stdoutTruncated, false)
+})
+
+test("runCli with collectStdout:false still detects stdout truncation", async () => {
+  const dir = tempDir()
+  const run = await runCli({
+    cliPath: FAKE_CLI,
+    args: ["-p", "-o", "json"],
+    cwd: dir,
+    timeoutMs: 60_000,
+    env: {
+      ...process.env,
+      FAKE_QODER_MODE: "huge-out",
+      FAKE_QODER_OUT_BYTES: String(MAX_STDOUT_BYTES + 5),
+    },
+    collectStdout: false,
+  })
+  assert.equal(run.stdoutTruncated, true)
+  assert.equal(run.stdout, "")
 })

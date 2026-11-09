@@ -447,6 +447,10 @@ interface FakeEnvKeys {
   FAKE_QODER_PARTIAL_DELAY_MS?: string
   FAKE_QODER_ZERO_USAGE?: string
   FAKE_QODER_CONTEXT_RATIO?: string
+  FAKE_QODER_RESULT_TEXT?: string
+  FAKE_QODER_STOP_REASON?: string
+  FAKE_QODER_USAGE_SPLIT?: string
+  FAKE_QODER_EMPTY_STOP?: string
 }
 
 async function withFakeEnv(overrides: FakeEnvKeys, run: () => Promise<void>) {
@@ -541,6 +545,176 @@ test("doStream fails when the CLI stream never produces a result event", async (
     const logged = readLogged(logFile)
     assert.equal(logged.length, 1)
     assert.equal(logged[0]!.isError, true)
+  })
+})
+
+test("doStream with an empty text block that never stops closes it once and reuses no id", async () => {
+  const { provider } = makeProvider()
+  const model = provider.languageModel("Auto")
+  await withFakeEnv({ FAKE_QODER_MODE: "partial-empty", FAKE_QODER_EMPTY_STOP: "0", FAKE_QODER_RESULT_TEXT: "" }, async () => {
+    const { stream } = await model.doStream({ prompt: PROMPT })
+    const parts: any[] = []
+    for await (const part of stream as unknown as AsyncIterable<any>) parts.push(part)
+
+    // The still-open empty parser block is closed first, then the fallback
+    // text block uses a brand new id: no id is ever started twice.
+    assert.deepEqual(
+      parts.map((part) => `${part.type}:${part.id ?? ""}`),
+      [
+        "stream-start:",
+        "text-start:qoder-text-0",
+        "text-end:qoder-text-0",
+        "text-start:qoder-text-fallback",
+        "text-end:qoder-text-fallback",
+        "finish:",
+      ],
+    )
+    const text = parts.filter((part) => part.type === "text-delta").map((part) => part.delta).join("")
+    assert.equal(text, "")
+  })
+})
+
+test("doStream with an empty stopped text block emits the fallback block with a unique id", async () => {
+  const { provider } = makeProvider()
+  const model = provider.languageModel("Auto")
+  await withFakeEnv({ FAKE_QODER_MODE: "partial-empty", FAKE_QODER_RESULT_TEXT: "" }, async () => {
+    const { stream } = await model.doStream({ prompt: PROMPT })
+    const parts: any[] = []
+    for await (const part of stream as unknown as AsyncIterable<any>) parts.push(part)
+
+    assert.deepEqual(
+      parts.map((part) => `${part.type}:${part.id ?? ""}`),
+      [
+        "stream-start:",
+        "text-start:qoder-text-0",
+        "text-end:qoder-text-0",
+        "text-start:qoder-text-fallback",
+        "text-end:qoder-text-fallback",
+        "finish:",
+      ],
+    )
+  })
+})
+
+test("doStream with an empty text block and non-empty result.text streams it as the fallback block", async () => {
+  const { provider } = makeProvider()
+  const model = provider.languageModel("Auto")
+  await withFakeEnv({ FAKE_QODER_MODE: "partial-empty", FAKE_QODER_RESULT_TEXT: "the real answer" }, async () => {
+    const { stream } = await model.doStream({ prompt: PROMPT })
+    const parts: any[] = []
+    for await (const part of stream as unknown as AsyncIterable<any>) parts.push(part)
+
+    assert.deepEqual(
+      parts.map((part) => `${part.type}:${part.id ?? ""}`),
+      [
+        "stream-start:",
+        "text-start:qoder-text-0",
+        "text-end:qoder-text-0",
+        "text-start:qoder-text-fallback",
+        "text-delta:qoder-text-fallback",
+        "text-end:qoder-text-fallback",
+        "finish:",
+      ],
+    )
+    const delta = parts.find((part) => part.type === "text-delta")!
+    assert.equal(delta.delta, "the real answer")
+    const finish = parts[parts.length - 1]!
+    assert.equal(finish.finishReason.unified, "stop")
+  })
+})
+
+test("every text block id in a doStream run starts and ends at most once", async () => {
+  // Structural guard against duplicate block sequences across all modes.
+  for (const env of [
+    { FAKE_QODER_MODE: "partial-empty", FAKE_QODER_EMPTY_STOP: "0" },
+    { FAKE_QODER_MODE: "partial-empty" },
+    { FAKE_QODER_MODE: "partial-empty", FAKE_QODER_RESULT_TEXT: "late text" },
+  ]) {
+    const { provider } = makeProvider()
+    const model = provider.languageModel("Auto")
+    await withFakeEnv(env, async () => {
+      const { stream } = await model.doStream({ prompt: PROMPT })
+      const parts: any[] = []
+      for await (const part of stream as unknown as AsyncIterable<any>) parts.push(part)
+      const starts = new Map<string, number>()
+      const ends = new Map<string, number>()
+      for (const part of parts) {
+        if (part.type === "text-start" || part.type === "reasoning-start") {
+          starts.set(part.id, (starts.get(part.id) ?? 0) + 1)
+        }
+        if (part.type === "text-end" || part.type === "reasoning-end") {
+          ends.set(part.id, (ends.get(part.id) ?? 0) + 1)
+        }
+      }
+      for (const [id, count] of starts) assert.equal(count, 1, `block id ${id} started ${count} times`)
+      for (const [id, count] of ends) assert.equal(count, 1, `block id ${id} ended ${count} times`)
+      assert.deepEqual([...ends.keys()].sort(), [...starts.keys()].sort())
+    })
+  }
+})
+
+test("doGenerate forwards a positive integer maxOutputTokens to --max-output-tokens", async () => {
+  const { provider, dir } = makeProvider()
+  const model = provider.languageModel("Auto")
+  const record = join(dir, "record.json")
+  await withFakeEnv({ FAKE_QODER_MODE: "ok", FAKE_QODER_RECORD: record }, async () => {
+    await model.doGenerate({ prompt: PROMPT, maxOutputTokens: 4096 })
+    const argv = (JSON.parse(readFileSync(record, "utf8")) as { argv: string[] }).argv
+    assert.equal(argv[argv.indexOf("--max-output-tokens") + 1], "4096")
+  })
+})
+
+test("doStream forwards a positive integer maxOutputTokens to --max-output-tokens", async () => {
+  const { provider, dir } = makeProvider()
+  const model = provider.languageModel("Auto")
+  const record = join(dir, "record.json")
+  await withFakeEnv({ FAKE_QODER_MODE: "partial", FAKE_QODER_RECORD: record }, async () => {
+    const { stream } = await model.doStream({ prompt: PROMPT, maxOutputTokens: 2048 })
+    for await (const _ of stream as unknown as AsyncIterable<any>) {
+      // drain
+    }
+    const argv = (JSON.parse(readFileSync(record, "utf8")) as { argv: string[] }).argv
+    assert.equal(argv[argv.indexOf("--max-output-tokens") + 1], "2048")
+    assert.equal(argv[argv.indexOf("-o") + 1], "stream-json")
+  })
+})
+
+test("invalid maxOutputTokens values never add the CLI flag", async () => {
+  const { provider, dir } = makeProvider()
+  const model = provider.languageModel("Auto")
+  const record = join(dir, "record.json")
+  for (const invalid of [0, -5, 2.5, Number.NaN]) {
+    await withFakeEnv({ FAKE_QODER_MODE: "ok", FAKE_QODER_RECORD: record }, async () => {
+      await model.doGenerate({ prompt: PROMPT, maxOutputTokens: invalid })
+      const argv = (JSON.parse(readFileSync(record, "utf8")) as { argv: string[] }).argv
+      assert.equal(argv.includes("--max-output-tokens"), false)
+    })
+  }
+})
+
+test("doGenerate maps a max_tokens stop reason to the unified length finish", async () => {
+  const { provider } = makeProvider()
+  const model = provider.languageModel("Auto")
+  await withFakeEnv({ FAKE_QODER_MODE: "ok", FAKE_QODER_STOP_REASON: "max_tokens" }, async () => {
+    const result = await model.doGenerate({ prompt: PROMPT })
+    assert.deepEqual(result.finishReason, { unified: "length", raw: "max_tokens" })
+  })
+})
+
+test("the split auto/fast modelUsage reports fast as the usage model with credits", async () => {
+  const { provider, logFile } = makeProvider()
+  const model = provider.languageModel("Auto")
+  await withFakeEnv({ FAKE_QODER_MODE: "ok", FAKE_QODER_USAGE_SPLIT: "1" }, async () => {
+    const result = await model.doGenerate({ prompt: PROMPT })
+    const metadata = result.providerMetadata!.qoder as Record<string, unknown>
+    assert.equal(metadata.usageModelKey, "fast")
+    assert.deepEqual(metadata.usageModelKeys, ["auto", "fast"])
+    assert.equal(metadata.modelCredits, 0.129)
+    assert.equal(result.usage.inputTokens.total, 10)
+
+    const logged = JSON.parse(readFileSync(logFile, "utf8").trim())
+    assert.equal(logged.usageModelKey, "fast")
+    assert.equal(logged.credits, 0.25)
   })
 })
 

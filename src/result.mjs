@@ -1,11 +1,16 @@
 /**
  * Extract credit usage and the CLI's accounting keys.
  * `modelUsage` keys are not evidence of the model that served the request.
+ *
+ * The primary entry is the first `modelUsage` entry that actually accounted
+ * for something (credits > 0 or any non-zero token counter). The CLI can
+ * emit an all-zero `auto` entry next to the real `fast` entry; key order
+ * alone would then report zero usage.
  */
 export function summarizeModelUsage(raw) {
   const modelUsage = raw?.modelUsage && typeof raw.modelUsage === "object" ? raw.modelUsage : {}
   const keys = Object.keys(modelUsage)
-  const primaryKey = keys[0]
+  const primaryKey = pickUsageModelKey(modelUsage)
   const primary = primaryKey ? (modelUsage[primaryKey] ?? {}) : {}
   const usage = raw?.usage && typeof raw.usage === "object" ? raw.usage : {}
 
@@ -41,6 +46,38 @@ export function readContextUsageRatio(raw) {
     if (typeof value === "number" && Number.isFinite(value) && value > 0 && value <= 1) return value
   }
   return undefined
+}
+
+/** `stop_reason` values that mean the output hit its token length limit. */
+const LENGTH_STOP_REASONS = new Set(["max_tokens", "max-output-tokens"])
+
+/** Map the CLI `stop_reason` onto the unified finish reason. */
+export function toUnifiedFinishReason(raw) {
+  if (raw?.is_error === true) return "error"
+  return LENGTH_STOP_REASONS.has(raw?.stop_reason) ? "length" : "stop"
+}
+
+/**
+ * Pick the `modelUsage` key that carries the real accounting: credits > 0 or
+ * any non-zero token counter. Falls back to the first key when no entry
+ * qualifies (all-zero accounting still reports the CLI's own ordering).
+ */
+function pickUsageModelKey(modelUsage) {
+  const keys = Object.keys(modelUsage)
+  for (const key of keys) {
+    const entry = modelUsage[key]
+    if (!entry || typeof entry !== "object") continue
+    if (numberOrUndefined(entry.credits) > 0) return key
+    if (
+      numberOrUndefined(entry.inputTokens) > 0 ||
+      numberOrUndefined(entry.outputTokens) > 0 ||
+      numberOrUndefined(entry.cacheReadInputTokens) > 0 ||
+      numberOrUndefined(entry.cacheCreationInputTokens) > 0
+    ) {
+      return key
+    }
+  }
+  return keys[0]
 }
 
 const FALLBACK_PATTERNS = [
@@ -152,7 +189,7 @@ export function buildGenerateResult({ raw, requestedModel, contextLimit }) {
   return {
     content: [{ type: "text", text }],
     finishReason: {
-      unified: isError ? "error" : "stop",
+      unified: toUnifiedFinishReason(raw),
       raw: typeof raw?.stop_reason === "string" ? raw.stop_reason : isError ? "error" : "end_turn",
     },
     usage: buildUsage(raw, { contextLimit }),

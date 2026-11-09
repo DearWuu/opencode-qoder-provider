@@ -11,7 +11,7 @@
  *  - FAKE_QODER_RECORD        path of the file that receives {argv, stdin, stdinBytes}
  *  - FAKE_QODER_PID_FILE      path of the file that receives the process pid
  *  - FAKE_QODER_MODE          ok | error | usage-auto | fallback | fallback-quoted |
- *                             hang | slow | partial | partial-no-result |
+ *                             hang | slow | partial | partial-no-result | partial-empty |
  *                             huge-out | huge-err | not-json | crash
  *  - FAKE_QODER_MODELS        newline separated model list for --list-models
  *  - FAKE_QODER_DISCOVERY_DELAY_MS  ms to wait before answering --list-models
@@ -23,6 +23,11 @@
  *  - FAKE_QODER_ERR_BYTES           stderr padding for `huge-err`
  *  - FAKE_QODER_ZERO_USAGE          set: every token counter in the result is 0
  *  - FAKE_QODER_CONTEXT_RATIO       set usage.context_usage_ratio to this value
+ *  - FAKE_QODER_RESULT_TEXT         override `result.result` (default "ok: <model>")
+ *  - FAKE_QODER_STOP_REASON         override `result.stop_reason` (default "end_turn")
+ *  - FAKE_QODER_USAGE_SPLIT         set: modelUsage has an all-zero `auto` entry
+ *                                   plus the real usage under `fast` with credits
+ *  - FAKE_QODER_EMPTY_STOP          "0": the empty text block gets no content_block_stop
  */
 import { writeFileSync } from "node:fs"
 
@@ -75,6 +80,34 @@ function resultPayload(requested) {
     cache_creation_input_tokens: 0,
   }
   if (ratio > 0) usage.context_usage_ratio = ratio
+  // `split` mimics the real Auto accounting seen in the wild: an all-zero
+  // `auto` entry first, the real usage under `fast` with credits.
+  const modelUsage = process.env.FAKE_QODER_USAGE_SPLIT
+    ? {
+        auto: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, credits: 0 },
+        fast: {
+          inputTokens: tokens,
+          outputTokens: outTokens,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+          costUSD: 0,
+          contextWindow: 0,
+          maxOutputTokens: 0,
+          credits: 0.129,
+        },
+      }
+    : {
+        [actual]: {
+          inputTokens: tokens,
+          outputTokens: outTokens,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+          costUSD: 0,
+          contextWindow: 0,
+          maxOutputTokens: 0,
+          credits: 0.25,
+        },
+      }
   return {
     type: "result",
     subtype: "success",
@@ -82,23 +115,12 @@ function resultPayload(requested) {
     duration_api_ms: 40,
     is_error: mode === "error",
     num_turns: 1,
-    result: mode === "error" ? "Qoder run failed" : `ok: ${requested}`,
-    stop_reason: "end_turn",
+    result: mode === "error" ? "Qoder run failed" : (process.env.FAKE_QODER_RESULT_TEXT ?? `ok: ${requested}`),
+    stop_reason: process.env.FAKE_QODER_STOP_REASON ?? "end_turn",
     total_cost_usd: 0,
     total_credits: 0.25,
     usage,
-    modelUsage: {
-      [actual]: {
-        inputTokens: tokens,
-        outputTokens: outTokens,
-        cacheReadInputTokens: 0,
-        cacheCreationInputTokens: 0,
-        costUSD: 0,
-        contextWindow: 0,
-        maxOutputTokens: 0,
-        credits: 0.25,
-      },
-    },
+    modelUsage,
     permission_denials: [],
     fast_mode_state: "off",
     uuid: "fake-uuid",
@@ -124,6 +146,23 @@ function streamJsonLines(requested) {
     { type: "stream_event", event: { type: "content_block_stop", index: 1 } },
     { type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } },
   ]
+  return lines
+}
+
+/**
+ * Empty text block transcript: a `content_block_start` for a text block that
+ * never emits a delta, an optional stop, then the result. `FAKE_QODER_RESULT_TEXT`
+ * controls `result.result` (default ""), `FAKE_QODER_EMPTY_STOP=0` omits the
+ * `content_block_stop` so the block is still open when the result arrives.
+ */
+function emptyTextLines(requested) {
+  const lines = [
+    { type: "system", subtype: "init", session_id: "fake-session" },
+    { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } },
+  ]
+  if (process.env.FAKE_QODER_EMPTY_STOP !== "0") {
+    lines.push({ type: "stream_event", event: { type: "content_block_stop", index: 0 } })
+  }
   return lines
 }
 
@@ -175,6 +214,17 @@ if (argv.includes("--list-models")) {
         process.stdout.write(JSON.stringify(resultPayload(argValue("--model") ?? "Auto")) + "\n")
         process.exit(0)
       }, delay)
+      return
+    }
+    if (mode === "partial-empty") {
+      void (async () => {
+        for (const line of emptyTextLines(argValue("--model") ?? "Auto")) {
+          process.stdout.write(`${JSON.stringify(line)}\n`)
+        }
+        process.stdout.write(`${JSON.stringify(resultPayload(argValue("--model") ?? "Auto"))}\n`)
+        await flush(process.stdout)
+        process.exit(0)
+      })()
       return
     }
     if (mode === "partial" || mode === "partial-no-result") {
