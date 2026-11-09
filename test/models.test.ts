@@ -1,7 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 
-import { buildModelCatalog, modelsEquivalent, parseModelEntry, parseModelList, toModelId } from "../src/models.mjs"
+import { buildModelCatalog, parseModelEntry, parseModelList, toModelId } from "../src/models.mjs"
 
 test("toModelId converts Qoder model names to lowercase kebab-case", () => {
   assert.equal(toModelId("Auto"), "auto")
@@ -42,13 +42,4 @@ test("buildModelCatalog keeps the Qoder modelID and resolves ID conflicts", () =
     { id: "my-model", modelID: "My Model", name: "My Model" },
     { id: "my-model-2", modelID: "My-Model", name: "My-Model" },
   ])
-})
-
-test("modelsEquivalent ignores case so Auto matches modelUsage.auto", () => {
-  assert.equal(modelsEquivalent("Auto", "auto"), true)
-  assert.equal(modelsEquivalent("auto", "Auto"), true)
-  assert.equal(modelsEquivalent("Qwen3.8-Max", "qwen3.8-max"), true)
-  assert.equal(modelsEquivalent("Fast", "auto"), false)
-  assert.equal(modelsEquivalent("DeepSeek-V4-Pro", "deepseek-v4-pro-flash"), false)
-  assert.equal(modelsEquivalent("", "auto"), false)
 })

@@ -14,8 +14,10 @@ function tempFile() {
 test("buildLogEntry keeps only metadata, never the prompt", () => {
   const entry = buildLogEntry({
     requestedModel: "Auto",
-    actualModel: "auto",
+    actualModel: "Auto",
     modelFallback: false,
+    usageModelKey: "auto",
+    usageModelKeys: ["auto"],
     credits: 0.25,
     durationMs: 42,
     isError: false,
@@ -26,6 +28,9 @@ test("buildLogEntry keeps only metadata, never the prompt", () => {
   assert.equal(entry.provider, "qoder")
   assert.equal(entry.model, "Auto")
   assert.equal(entry.credits, 0.25)
+  assert.equal(entry.actualModel, "Auto")
+  assert.equal(entry.usageModelKey, "auto")
+  assert.deepEqual(entry.usageModelKeys, ["auto"])
   assert.equal(entry.sessionId, "session-1")
   assert.equal("prompt" in entry, false)
   assert.equal("auth" in entry, false)

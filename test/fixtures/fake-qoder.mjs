@@ -9,7 +9,7 @@
  *
  * Behaviour is controlled through environment variables:
  *  - FAKE_QODER_RECORD   path of the file that receives {argv, stdin, stdinBytes}
- *  - FAKE_QODER_MODE     ok | error | fallback | hang | not-json | crash
+ *  - FAKE_QODER_MODE     ok | error | usage-auto | fallback | fallback-quoted | hang | not-json | crash
  *  - FAKE_QODER_MODELS   newline separated model list for --list-models
  */
 import { writeFileSync } from "node:fs"
@@ -64,7 +64,12 @@ process.stdin.on("end", () => {
   }
 
   const requested = argValue("--model") ?? "Auto"
-  const actual = mode === "fallback" ? "auto" : requested.toLowerCase()
+  if (mode === "fallback") {
+    process.stderr.write("Model efficient is not available, falling back to auto instead\n")
+  } else if (mode === "fallback-quoted") {
+    process.stderr.write('Model "efficient" is not available, using "auto" instead\n')
+  }
+  const actual = ["usage-auto", "fallback", "fallback-quoted"].includes(mode) ? "auto" : requested.toLowerCase()
   const payload = {
     type: "result",
     subtype: "success",

@@ -1,9 +1,6 @@
-import { modelsEquivalent } from "./models.mjs"
-
 /**
- * Extract the model that actually served the request plus its credit usage.
- * The CLI reports `modelUsage` keyed by the *model key* (e.g. `auto`), while the
- * request carries the display name (e.g. `Auto`).
+ * Extract credit usage and the CLI's accounting keys.
+ * `modelUsage` keys are not evidence of the model that served the request.
  */
 export function summarizeModelUsage(raw) {
   const modelUsage = raw?.modelUsage && typeof raw.modelUsage === "object" ? raw.modelUsage : {}
@@ -20,7 +17,8 @@ export function summarizeModelUsage(raw) {
   const noCache = inputTotal !== undefined && cacheRead !== undefined ? Math.max(0, inputTotal - cacheRead) : undefined
 
   return {
-    actualModel: primaryKey,
+    usageModelKey: primaryKey,
+    usageModelKeys: keys,
     credits: numberOrUndefined(primary.credits),
     inputTokens: inputTotal,
     outputTokens: outputTotal,
@@ -30,22 +28,30 @@ export function summarizeModelUsage(raw) {
   }
 }
 
-/**
- * Detect a server side model fallback.
- * Comparison ignores case (and punctuation) so `Auto` matches `modelUsage.auto`.
- */
-export function detectFallback(requestedModel, modelUsage) {
-  const keys = Object.keys(modelUsage && typeof modelUsage === "object" ? modelUsage : {})
-  if (keys.length === 0) return { fellBack: false, actualModel: undefined }
-  if (typeof requestedModel !== "string" || requestedModel.trim().length === 0) {
-    return { fellBack: false, actualModel: keys[0] }
-  }
-  for (const key of keys) {
-    if (modelsEquivalent(requestedModel, key)) {
-      return { fellBack: false, actualModel: key }
+const FALLBACK_PATTERNS = [
+  /\bModel\s+(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z0-9][A-Za-z0-9._-]*))[^\r\n]*?\bfalling\s+back\s+to\s+(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z0-9][A-Za-z0-9._-]*))/i,
+  /\bModel\s+(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z0-9][A-Za-z0-9._-]*))[^\r\n]*?\busing\s+(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z0-9][A-Za-z0-9._-]*))\s+instead\b/i,
+]
+
+/** Detect only an explicit model fallback message written by the CLI to stderr. */
+export function detectFallback(requestedModel, stderr) {
+  const text = typeof stderr === "string" ? stderr : ""
+  for (const line of text.split(/\r?\n/)) {
+    for (const pattern of FALLBACK_PATTERNS) {
+      const match = pattern.exec(line)
+      if (match) return { fellBack: true, actualModel: match[4] ?? match[5] ?? match[6] }
     }
   }
-  return { fellBack: true, actualModel: keys[0] }
+  return { fellBack: false, actualModel: requestedModel }
+}
+
+export class ModelFallbackError extends Error {
+  constructor(requestedModel, actualModel) {
+    super(`Qoder model fallback detected: requested "${requestedModel}" was served by "${actualModel}". The response was rejected.`)
+    this.name = "ModelFallbackError"
+    this.requestedModel = requestedModel
+    this.actualModel = actualModel
+  }
 }
 
 /** Build the AI SDK V3 usage block (nested input/output token counters). */
@@ -72,7 +78,7 @@ export function buildUsage(raw) {
 }
 
 /** Build `providerMetadata.qoder` from the CLI result. */
-export function buildProviderMetadata({ raw, requestedModel, fallback }) {
+export function buildProviderMetadata({ raw, requestedModel, fallback = undefined }) {
   const summary = summarizeModelUsage(raw)
   const metadata = {
     sessionId: raw?.session_id,
@@ -81,8 +87,10 @@ export function buildProviderMetadata({ raw, requestedModel, fallback }) {
     totalCredits: numberOrUndefined(raw?.total_credits),
     modelCredits: summary.credits,
     requestedModel,
-    actualModel: fallback?.actualModel ?? summary.actualModel,
+    actualModel: fallback?.actualModel ?? requestedModel,
     modelFallback: fallback?.fellBack === true,
+    usageModelKey: summary.usageModelKey,
+    usageModelKeys: summary.usageModelKeys,
     modelUsage: summary.modelUsage,
     permissionDenials: Array.isArray(raw?.permission_denials) ? raw.permission_denials : [],
     durationMs: numberOrUndefined(raw?.duration_ms),
@@ -95,20 +103,11 @@ export function buildProviderMetadata({ raw, requestedModel, fallback }) {
 
 /**
  * Convert a raw CLI result into an AI SDK V3 generate result.
- *
- * A server side model fallback keeps the answer but appends a visible warning.
+ * Explicit fallbacks are rejected by `execute` before reaching this conversion.
  */
 export function buildGenerateResult({ raw, requestedModel }) {
   const isError = raw?.is_error === true
-  const fallback = detectFallback(requestedModel, raw?.modelUsage)
-  const warnings = []
-
-  let text = typeof raw?.result === "string" ? raw.result : ""
-  if (fallback.fellBack) {
-    const message = `Qoder model fallback: requested "${requestedModel}" was served by "${fallback.actualModel}".`
-    warnings.push({ type: "other", message })
-    text = text.length > 0 ? `${text}\n\n> ⚠️ ${message}` : `> ⚠️ ${message}`
-  }
+  const text = typeof raw?.result === "string" ? raw.result : ""
 
   return {
     content: [{ type: "text", text }],
@@ -117,9 +116,9 @@ export function buildGenerateResult({ raw, requestedModel }) {
       raw: typeof raw?.stop_reason === "string" ? raw.stop_reason : isError ? "error" : "end_turn",
     },
     usage: buildUsage(raw),
-    warnings,
+    warnings: [],
     providerMetadata: {
-      qoder: buildProviderMetadata({ raw, requestedModel, fallback }),
+      qoder: buildProviderMetadata({ raw, requestedModel }),
     },
   }
 }
@@ -128,6 +127,7 @@ function numberOrUndefined(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined
 }
 
+/** @param {Record<string, any>} value @returns {Record<string, any>} */
 function stripUndefined(value) {
   const result = {}
   for (const [key, entry] of Object.entries(value)) {

@@ -1,7 +1,7 @@
 import { buildCliArgs, parseCliResult, runCli } from "./cli.mjs"
 import { appendCallLog, buildLogEntry } from "./logger.mjs"
 import { assertPromptSize, serializePrompt } from "./prompt.mjs"
-import { buildGenerateResult, detectFallback, summarizeModelUsage } from "./result.mjs"
+import { ModelFallbackError, buildGenerateResult, detectFallback, summarizeModelUsage } from "./result.mjs"
 import { PROVIDER_ID, resolveOptions } from "./options.mjs"
 
 /**
@@ -137,21 +137,25 @@ async function execute({ modelID, resolved, prompt, signal }) {
     throw cliFailure(run, error)
   }
 
-  const result = buildGenerateResult({ raw, requestedModel: modelID })
   const summary = summarizeModelUsage(raw)
-  const fallback = detectFallback(modelID, raw?.modelUsage)
+  const fallback = detectFallback(modelID, run.stderr)
 
   logCall(resolved, {
     requestedModel: modelID,
-    actualModel: fallback.actualModel ?? summary.actualModel,
+    actualModel: fallback.actualModel,
     modelFallback: fallback.fellBack,
+    usageModelKey: summary.usageModelKey,
+    usageModelKeys: summary.usageModelKeys,
     credits: typeof raw?.total_credits === "number" ? raw.total_credits : summary.credits,
     durationMs: run.durationMs,
-    isError: raw?.is_error === true,
+    isError: raw?.is_error === true || fallback.fellBack,
     exitCode: run.code,
     sessionId: raw?.session_id,
   })
 
+  if (fallback.fellBack) throw new ModelFallbackError(modelID, fallback.actualModel)
+
+  const result = buildGenerateResult({ raw, requestedModel: modelID })
   return { result, raw, run }
 }
 

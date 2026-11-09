@@ -16,7 +16,7 @@
 | `rpc.ts` | RPC 契约：`qoder` id、`execute` 方法（`{text}` → `{text}`），server 与 TUI 共用 |
 | `provider.mjs` | provider runtime。导出 `createQoder(options)`，返回带 `languageModel(modelID)` 的 provider（AI SDK **LanguageModelV3**） |
 | `src/options.mjs` | 选项与默认值解析（CLI 路径、权限模式、超时、日志位置） |
-| `src/models.mjs` | Qoder 模型名 ↔ OpenCode 模型 ID 映射、目录解析、回落比较 |
+| `src/models.mjs` | Qoder 模型名 ↔ OpenCode 模型 ID 映射、目录解析 |
 | `src/prompt.mjs` | prompt 序列化（system/user/assistant/tool）与字节上限检查 |
 | `src/cli.mjs` | spawn Qoder CLI、stdin 写入、进程树终止、超时 |
 | `src/result.mjs` | CLI 结果 → AI SDK V3 结果、Credits 提取、回落检测 |
@@ -164,7 +164,7 @@ curl -u "opencode:<口令>" -X POST \
 
 ## 调用日志
 
-每次调用写一行 JSON（**不含 prompt、不含回答、不含任何凭证**）。字段包括 `ts`、`provider`、`model`、`actualModel`、`modelFallback`、`credits`、`durationMs`、`isError`、`exitCode` 与 `sessionId`，具体值来自当次 CLI 调用。
+每次调用写一行 JSON（**不含 prompt、不含回答、不含任何凭证**）。字段包括 `ts`、`provider`、`model`、`actualModel`、`modelFallback`、`usageModelKey`、`usageModelKeys`、`credits`、`durationMs`、`isError`、`exitCode` 与 `sessionId`，具体值来自当次 CLI 调用。
 
 同样的数据也会放进 AI SDK 的 `providerMetadata.qoder`，方便上层读取 Credits 与 Qoder session id。仓库不包含真实调用日志。
 
@@ -177,7 +177,8 @@ curl -u "opencode:<口令>" -X POST \
 - **prompt 被拍平成纯文本**：system/user/assistant/tool 会被序列化成带 `[system]`/`[user]`/`[assistant]`/`[tool]` 前缀的文本（工具调用序列化为 JSON），角色语义会有损失。
 - **不传 `--input-format`**：CLI 1.1.85 校验 `--input-format=stream-json requires output-format=stream-json`，所以 prompt 只能以纯文本写 stdin。
 - **流式不是实时的**：Qoder CLI 只在整轮结束后输出结果，`doStream` 会在 CLI 返回后依次发 `stream-start`/`text-start`/`text-delta`/`text-end`/`finish`，首版不承诺逐 token 流式。
-- **模型回落**：请求模型与 `result.modelUsage` 里的实际 key 不一致时（比较忽略大小写与标点，`Auto` ↔ `modelUsage.auto` 视为一致，不会误报），保留原回答并追加一条显眼的回落警告。
+- **模型回落判定**：只有 CLI stderr 明确输出 `Model ... falling back to ...` 或 `Model ... using ... instead` 才认定为回落。`result.modelUsage` 的 key 只作为 `usageModelKey` / `usageModelKeys` 记录，不参与回落判定，也不冒充 `actualModel`；没有明确 stderr 时，`actualModel` 使用请求模型，DeepSeek-Flash 或 Fast 搭配 `modelUsage.auto` 不会产生警告或失败。
+- **明确回落处理**：`execute` 记录 Credits、session、错误状态、exitCode 与耗时后抛出 `ModelFallbackError`。`doGenerate` 拒绝该调用，`doStream` 发出 error part，均不返回成功结果、不自动重试。
 - **会话标题会额外调一次模型**：OpenCode 用会话模型生成会话标题，这是 OpenCode 自带行为、与插件无关，会多消耗一次 Credits。可在 OpenCode 配置里设 `small_model` 指向便宜的模型来避免。
 - **CLI 缺失/未登录**：调用会失败并给出安装或登录指引；占位模型仍可选择。
 - 插件不修改任何全局默认模型，也不写入 Qoder 之外的目录。
@@ -194,7 +195,7 @@ npm run check     # tsc --noEmit
 
 另有可选的 `npm test`（Bun）与 `npm run check:catalog`。后者会用真实 Qoder CLI 读取一次 `--list-models`，只用于本地人工检查；自动化测试与 CI 不运行它。
 
-测试用 `test/fixtures/fake-qoder.mjs` 假 CLI，**不消耗 Credits、不联网、不需要登录**。覆盖：模型 ID 与冲突、prompt 多角色序列化与媒体报错、stdin 纯文本（断言参数里没有 `--input-format`）、doGenerate/doStream 的 V3 事件、`is_error`、回落警告与误报防护、Credits metadata 与日志脱敏、abort 与超时。
+测试用 `test/fixtures/fake-qoder.mjs` 假 CLI，**不消耗 Credits、不联网、不需要登录**。覆盖：模型 ID 与冲突、prompt 多角色序列化与媒体报错、stdin 纯文本（断言参数里没有 `--input-format`）、doGenerate/doStream 的 V3 事件、`is_error`、明确回落拒绝与误报防护、Credits metadata 与日志脱敏、abort 与超时。
 
 另外覆盖 TUI 与 RPC：RPC 契约的形状、`/qoder` slash 注册、RPC 调用成功走 dialog、失败走 error toast、`refresh` 之后刷新模型列表、server command 与 RPC 返回同一段文本、插件卸载时注销 RPC 注册。
 

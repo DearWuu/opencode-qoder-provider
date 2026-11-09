@@ -59,24 +59,3 @@ export function buildModelCatalog(entries) {
     return { id, modelID: entry.modelID, name: entry.name }
   })
 }
-
-/**
- * Compare two model identifiers ignoring case.
- *
- * Qoder reports the *key* of the model that actually served the request
- * (`modelUsage.auto`) while the request carries the display name (`Auto`), so a
- * plain string comparison would report a bogus fallback.
- */
-export function modelsEquivalent(requested, actual) {
-  if (typeof requested !== "string" || typeof actual !== "string") return false
-  const left = requested.trim().toLowerCase()
-  const right = actual.trim().toLowerCase()
-  if (left.length === 0 || right.length === 0) return false
-  if (left === right) return true
-  // Fall back to a punctuation-insensitive comparison ("Qwen3.8-Max" vs "qwen3.8max").
-  return stripPunctuation(left) === stripPunctuation(right)
-}
-
-function stripPunctuation(value) {
-  return value.replace(/[^a-z0-9]/g, "")
-}

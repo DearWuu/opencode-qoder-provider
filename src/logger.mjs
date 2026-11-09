@@ -27,6 +27,8 @@ export function appendCallLog(file, entry) {
  * @param {object} entry
  * @param {string} entry.requestedModel
  * @param {string} [entry.actualModel]
+ * @param {string} [entry.usageModelKey]
+ * @param {string[]} [entry.usageModelKeys]
  * @param {number} [entry.credits]
  * @param {number} [entry.durationMs]
  * @param {boolean} [entry.isError]
@@ -37,13 +39,15 @@ export function appendCallLog(file, entry) {
  * @param {boolean} [entry.modelFallback]
  * @returns {Record<string, any>}
  */
-export function buildLogEntry({ requestedModel, actualModel, credits, durationMs, isError, exitCode, sessionId, timedOut, aborted, modelFallback }) {
+export function buildLogEntry({ requestedModel, actualModel, usageModelKey, usageModelKeys, credits, durationMs, isError, exitCode, sessionId, timedOut, aborted, modelFallback }) {
   const entry = {
     ts: new Date().toISOString(),
     provider: "qoder",
     model: requestedModel,
     actualModel,
     modelFallback,
+    usageModelKey,
+    usageModelKeys,
     credits,
     durationMs,
     isError,
