@@ -1,8 +1,8 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { appendFileSync, mkdtempSync, readFileSync } from "node:fs"
+import { appendFileSync, chmodSync, mkdtempSync, readFileSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 
 import { appendCallLog, buildLogEntry, readCallLog, sumCredits } from "../src/logger.mjs"
 import { defaultLogFile } from "../src/options.mjs"
@@ -69,4 +69,22 @@ test("defaultLogFile honours XDG_STATE_HOME", () => {
 
 test("readCallLog returns an empty list for a missing file", () => {
   assert.deepEqual(readCallLog(join(tmpdir(), "qoder-does-not-exist.jsonl")), [])
+})
+
+test("appendCallLog keeps the log private: directory 0700, file 0600", (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX permission bits do not exist on Windows")
+    return
+  }
+  const file = tempFile()
+  appendCallLog(file, buildLogEntry({ requestedModel: "Auto", credits: 0.5 }))
+
+  assert.equal(statSync(dirname(file)).mode & 0o777, 0o700)
+  assert.equal(statSync(file).mode & 0o777, 0o600)
+
+  // A world-readable file created by an older version is tightened best effort.
+  chmodSync(file, 0o644)
+  appendCallLog(file, buildLogEntry({ requestedModel: "Fast", credits: 0.25 }))
+  assert.equal(statSync(file).mode & 0o777, 0o600)
+  assert.equal(readFileSync(file, "utf8").trim().split("\n").length, 2)
 })

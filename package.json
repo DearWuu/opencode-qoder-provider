@@ -15,6 +15,7 @@
     "rpc.ts",
     "provider.mjs",
     "src",
+    "scripts",
     "README.md"
   ],
   "scripts": {

@@ -6,8 +6,8 @@ import { fileURLToPath } from "node:url"
 export const PROVIDER_ID = "qoder"
 export const PROVIDER_NAME = "Qoder (Credits)"
 
-/** Permission mode used when the user does not configure one. Never `bypass_permissions`. */
-export const DEFAULT_PERMISSION_MODE = "accept_edits"
+/** Permission mode used when the user does not configure one. Elevated modes require explicit configuration. */
+export const DEFAULT_PERMISSION_MODE = "default"
 
 /** Permission modes accepted by `qoderclicn --permission-mode` (see `qoderclicn --help`). */
 export const ALLOWED_PERMISSION_MODES = ["default", "accept_edits", "bypass_permissions", "dont_ask", "auto"]
@@ -68,16 +68,20 @@ export function resolveOptions(raw = {}, env = process.env) {
     bundledCliPath() ??
     "qoderclicn"
 
-  const permissionMode = firstString(raw.permissionMode) ?? firstString(env.QODER_PERMISSION_MODE) ?? DEFAULT_PERMISSION_MODE
-  if (!ALLOWED_PERMISSION_MODES.includes(permissionMode)) {
+  const configuredPermissionMode = raw.permissionMode ?? env.QODER_PERMISSION_MODE ?? DEFAULT_PERMISSION_MODE
+  const permissionMode = typeof configuredPermissionMode === "string" ? configuredPermissionMode.trim() : configuredPermissionMode
+  if (typeof permissionMode !== "string" || !ALLOWED_PERMISSION_MODES.includes(permissionMode)) {
     throw new Error(
-      `Invalid permissionMode "${permissionMode}". Allowed values: ${ALLOWED_PERMISSION_MODES.join(", ")}.`,
+      `Invalid permissionMode "${String(configuredPermissionMode)}". Allowed values: ${ALLOWED_PERMISSION_MODES.join(", ")}.`,
     )
   }
 
-  const timeoutMs = firstNumber(raw.timeoutMs) ?? firstNumber(env.QODER_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new Error(`Invalid timeoutMs "${raw.timeoutMs ?? env.QODER_TIMEOUT_MS}". Expected a positive number.`)
+  const configuredTimeout = raw.timeoutMs ?? env.QODER_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS
+  const timeoutMs = typeof configuredTimeout === "string" && configuredTimeout.trim().length > 0
+    ? Number(configuredTimeout)
+    : configuredTimeout
+  if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error(`Invalid timeoutMs "${String(configuredTimeout)}". Expected a positive number.`)
   }
 
   const logFile = firstString(raw.logFile) ?? firstString(env.QODER_LOG_FILE) ?? defaultLogFile(env)
@@ -97,11 +101,3 @@ function firstString(value) {
   return trimmed.length > 0 ? trimmed : undefined
 }
 
-function firstNumber(value) {
-  if (typeof value === "number" && Number.isFinite(value)) return value
-  if (typeof value !== "string") return undefined
-  const trimmed = value.trim()
-  if (!trimmed) return undefined
-  const parsed = Number(trimmed)
-  return Number.isFinite(parsed) ? parsed : undefined
-}

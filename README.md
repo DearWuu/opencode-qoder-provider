@@ -71,6 +71,8 @@ qoderclicn login
 
 模型清单随账号变化，用 `/qoder refresh` 刷新。
 
+> **`/models` 里搜 provider 名搜不到**：上游 2.2.6 的模型选择器按**模型 ID/名称**过滤搜索文本，输入 `qoder` 会过滤掉全部结果。请直接清空搜索词浏览 `Qoder (Credits)` 分组，或搜模型名（如 `Fast`、`Auto`）。
+
 ## 在 Subagent 里用 qoder/auto
 
 在 `opencode.jsonc` 里定义一个使用 Qoder 的 agent：
@@ -138,27 +140,30 @@ curl -u "opencode:<口令>" -X POST \
 
 ## 配置项
 
-插件选项来自 OpenCode 插件配置的 `options` 对象，也可以用环境变量覆盖：
+插件选项来自 OpenCode 配置里 `plugins[].options` 对象，也可以用环境变量覆盖：
 
 | 选项 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `cliPath` | `QODER_CLI_PATH` | 插件自带的 `node_modules/@qodercn-ai/qoderclicn/bundle/qoderclicn.js`，其次是 `PATH` 里的 `qoderclicn` | Qoder CLI 可执行文件 |
-| `permissionMode` | `QODER_PERMISSION_MODE` | `accept_edits` | 透传给 `--permission-mode`。可选：`default`、`accept_edits`、`bypass_permissions`、`dont_ask`、`auto`。**默认不会**是 `bypass_permissions` |
-| `timeoutMs` | `QODER_TIMEOUT_MS` | `1800000`（30 分钟） | 单次调用超时，超时后终止整个进程树 |
-| `logFile` | `QODER_LOG_FILE` | `${XDG_STATE_HOME:-~/.local/state}/opencode/qoder-provider/calls.jsonl` | JSONL 调用日志 |
+| `permissionMode` | `QODER_PERMISSION_MODE` | `default` | 透传给 `--permission-mode`。可选：`default`、`accept_edits`、`bypass_permissions`、`dont_ask`、`auto`。默认是安全值 `default`（写文件/执行命令逐项确认）；`accept_edits`、`auto`、`dont_ask`、`bypass_permissions` 都会放宽 Qoder CLI 的确认门槛，属于**显式启用、风险自担**，非法取值会直接报错而不是退回默认值 |
+| `timeoutMs` | `QODER_TIMEOUT_MS` | `1800000`（30 分钟） | 单次调用超时，超时后终止整个进程树；非法值直接报错 |
+| `logFile` | `QODER_LOG_FILE` | `${XDG_STATE_HOME:-~/.local/state}/opencode/qoder-provider/calls.jsonl` | JSONL 调用日志（目录 0700、文件 0600） |
 | — | — | `ctx.location.directory` | CLI 的 `--cwd`，取当前 OpenCode 工作目录 |
 
-示例（`opencode.jsonc`）：
+示例（`opencode.jsonc`，OpenCode V2 的 `plugins` 数组写法；旧的 `plugin` 键已废弃）：
 
 ```jsonc
 {
-  "plugin": {
-    "opencode-qoder-provider": {
-      "cliPath": "/usr/local/bin/qoderclicn",
-      "permissionMode": "accept_edits",
-      "timeoutMs": 1800000
+  "plugins": [
+    {
+      "package": "opencode-qoder-provider",
+      "options": {
+        "cliPath": "/usr/local/bin/qoderclicn",
+        "permissionMode": "accept_edits",
+        "timeoutMs": 1800000
+      }
     }
-  }
+  ]
 }
 ```
 

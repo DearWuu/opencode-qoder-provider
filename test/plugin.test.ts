@@ -229,3 +229,57 @@ test("the plugin disposes the RPC registration when it is unloaded", async () =>
   await cleanup?.()
   assert.equal(harness.rpcDisposed.disposed, 1)
 })
+
+test("an empty model catalog falls back to the placeholder catalog", async () => {
+  const harness = createHarness()
+  const previous = process.env.FAKE_QODER_MODELS
+  process.env.FAKE_QODER_MODELS = ""
+  try {
+    await QoderProviderPlugin.setup(harness.ctx as never)
+  } finally {
+    if (previous === undefined) delete process.env.FAKE_QODER_MODELS
+    else process.env.FAKE_QODER_MODELS = previous
+  }
+
+  assert.deepEqual(
+    harness.providerAdds[0].models.map((model: any) => model.id),
+    ["auto", "fast"],
+  )
+
+  await harness.commands[0].execute({ sessionID: "session-1", prompt: { text: "/qoder status" }, delivery: "steer" })
+  const text = harness.synthetic[0].text as string
+  assert.match(text, /Auth: unavailable/)
+  assert.match(text, /empty model catalog/)
+})
+
+test("/qoder refresh never lets a stale slow discovery overwrite the newer catalog", async () => {
+  const harness = createHarness()
+  await QoderProviderPlugin.setup(harness.ctx as never)
+
+  const previousModels = process.env.FAKE_QODER_MODELS
+  const previousDelay = process.env.FAKE_QODER_DISCOVERY_DELAY_MS
+  const refresh = () =>
+    harness.commands[0].execute({ sessionID: "session-1", prompt: { text: "/qoder refresh" }, delivery: "steer" })
+
+  try {
+    process.env.FAKE_QODER_MODELS = "Slow One"
+    process.env.FAKE_QODER_DISCOVERY_DELAY_MS = "500"
+    const stale = refresh()
+
+    process.env.FAKE_QODER_MODELS = "Fast Two"
+    process.env.FAKE_QODER_DISCOVERY_DELAY_MS = "0"
+    const current = refresh()
+
+    await Promise.all([stale, current])
+  } finally {
+    if (previousModels === undefined) delete process.env.FAKE_QODER_MODELS
+    else process.env.FAKE_QODER_MODELS = previousModels
+    if (previousDelay === undefined) delete process.env.FAKE_QODER_DISCOVERY_DELAY_MS
+    else process.env.FAKE_QODER_DISCOVERY_DELAY_MS = previousDelay
+  }
+
+  await harness.commands[0].execute({ sessionID: "session-1", prompt: { text: "/qoder models" }, delivery: "steer" })
+  const text = harness.synthetic[harness.synthetic.length - 1]!.text as string
+  assert.match(text, /qoder\/fast-two/)
+  assert.equal(/slow-one/.test(text), false)
+})

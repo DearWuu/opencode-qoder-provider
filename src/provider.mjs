@@ -1,4 +1,4 @@
-import { buildCliArgs, parseCliResult, runCli } from "./cli.mjs"
+import { MAX_STDOUT_BYTES, buildCliArgs, parseCliResult, runCli } from "./cli.mjs"
 import { appendCallLog, buildLogEntry } from "./logger.mjs"
 import { assertPromptSize, serializePrompt } from "./prompt.mjs"
 import { ModelFallbackError, buildGenerateResult, detectFallback, summarizeModelUsage } from "./result.mjs"
@@ -13,7 +13,7 @@ import { PROVIDER_ID, resolveOptions } from "./options.mjs"
  *
  * @param {object} [options]
  * @param {string} [options.cliPath] Path to `qoderclicn` (default: bundled CLI, then `QODER_CLI_PATH`, then `PATH`).
- * @param {string} [options.permissionMode] Qoder CLI permission mode (default `accept_edits`).
+ * @param {string} [options.permissionMode] Qoder CLI permission mode (default `default`).
  * @param {number} [options.timeoutMs] Per call timeout (default 30 minutes).
  * @param {string} [options.logFile] JSONL call log path.
  * @param {string} [options.cwd] Working directory for the CLI run.
@@ -55,28 +55,62 @@ export function createLanguageModel(modelID, resolved) {
     async doStream(callOptions = {}) {
       const prompt = serializePrompt(callOptions.prompt)
       assertPromptSize(prompt)
+      const abortController = new AbortController()
+      const externalSignal = callOptions.abortSignal
+      let cancelled = false
+      const abort = (reason) => {
+        if (!abortController.signal.aborted) abortController.abort(reason)
+      }
+      const onExternalAbort = () => abort(externalSignal?.reason)
+      const cleanup = () => externalSignal?.removeEventListener("abort", onExternalAbort)
+      if (externalSignal?.aborted) onExternalAbort()
+      else externalSignal?.addEventListener("abort", onExternalAbort, { once: true })
+
       const stream = new ReadableStream({
         async start(controller) {
-          controller.enqueue({ type: "stream-start", warnings: [] })
+          // A cancel can land while `execute` is pending; enqueues after a
+          // cancel would throw, so every emit is guarded and swallowed.
+          const emit = (chunk) => {
+            if (cancelled) return
+            try {
+              controller.enqueue(chunk)
+            } catch {}
+          }
+          emit({ type: "stream-start", warnings: [] })
           try {
-            const outcome = await execute({ modelID, resolved, prompt, signal: callOptions.abortSignal })
+            const outcome = await execute({ modelID, resolved, prompt, signal: abortController.signal })
+            if (cancelled) return
             const text = outcome.result.content.map((part) => (part.type === "text" ? part.text : "")).join("")
-            controller.enqueue({ type: "text-start", id: "qoder-text-0" })
+            emit({ type: "text-start", id: "qoder-text-0" })
             if (text.length > 0) {
-              controller.enqueue({ type: "text-delta", id: "qoder-text-0", delta: text })
+              emit({ type: "text-delta", id: "qoder-text-0", delta: text })
             }
-            controller.enqueue({ type: "text-end", id: "qoder-text-0" })
-            controller.enqueue({
+            emit({ type: "text-end", id: "qoder-text-0" })
+            emit({
               type: "finish",
               usage: outcome.result.usage,
               finishReason: outcome.result.finishReason,
               providerMetadata: outcome.result.providerMetadata,
             })
           } catch (error) {
-            controller.enqueue({ type: "error", error })
+            if (!cancelled) {
+              try {
+                controller.enqueue({ type: "error", error })
+              } catch {}
+            }
           } finally {
-            controller.close()
+            cleanup()
+            if (!cancelled) {
+              try {
+                controller.close()
+              } catch {}
+            }
           }
+        },
+        cancel(reason) {
+          cancelled = true
+          cleanup()
+          abort(reason)
         },
       })
       return { stream }
@@ -122,6 +156,16 @@ async function execute({ modelID, resolved, prompt, signal }) {
       timedOut: true,
     })
     throw timeoutError(resolved.timeoutMs, run)
+  }
+
+  if (run.stdoutTruncated) {
+    logCall(resolved, {
+      requestedModel: modelID,
+      durationMs: run.durationMs,
+      isError: true,
+      exitCode: run.code,
+    })
+    throw new Error(`Qoder CLI stdout exceeded the ${MAX_STDOUT_BYTES} byte limit and was truncated.`)
   }
 
   let raw

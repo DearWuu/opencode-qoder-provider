@@ -1,11 +1,12 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
+import { EventEmitter } from "node:events"
 import { mkdtempSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 
-import { buildCliArgs, parseCliResult, runCli } from "../src/cli.mjs"
+import { MAX_STDERR_BYTES, MAX_STDOUT_BYTES, buildCliArgs, killTree, parseCliResult, runCli } from "../src/cli.mjs"
 
 const FAKE_CLI = fileURLToPath(new URL("./fixtures/fake-qoder.mjs", import.meta.url))
 
@@ -69,4 +70,98 @@ test("runCli reports a missing CLI binary", async () => {
     runCli({ cliPath: join(tempDir(), "does-not-exist"), args: ["--version"], timeoutMs: 5_000 }),
     /Qoder CLI not found/,
   )
+})
+
+test("stdout is truncated at exactly the 32 MiB cap and the truncation is flagged", async () => {
+  const dir = tempDir()
+  const run = await runCli({
+    cliPath: FAKE_CLI,
+    args: ["-p", "-o", "json"],
+    cwd: dir,
+    timeoutMs: 60_000,
+    env: {
+      ...process.env,
+      FAKE_QODER_MODE: "huge-out",
+      FAKE_QODER_OUT_BYTES: String(MAX_STDOUT_BYTES + 5),
+    },
+  })
+
+  assert.equal(run.stdoutTruncated, true)
+  assert.equal(Buffer.byteLength(run.stdout, "utf8"), MAX_STDOUT_BYTES)
+  assert.equal(run.code, 0)
+  assert.equal(run.timedOut, false)
+})
+
+test("stdout at exactly the cap is kept whole without a truncation flag", async () => {
+  const dir = tempDir()
+  const run = await runCli({
+    cliPath: FAKE_CLI,
+    args: ["-p", "-o", "json"],
+    cwd: dir,
+    timeoutMs: 60_000,
+    env: {
+      ...process.env,
+      FAKE_QODER_MODE: "huge-out",
+      FAKE_QODER_OUT_BYTES: String(MAX_STDOUT_BYTES),
+    },
+  })
+
+  assert.equal(run.stdoutTruncated, false)
+  assert.equal(Buffer.byteLength(run.stdout, "utf8"), MAX_STDOUT_BYTES)
+})
+
+test("stderr is truncated at exactly the 8 KiB cap and the truncation is flagged", async () => {
+  const dir = tempDir()
+  const run = await runCli({
+    cliPath: FAKE_CLI,
+    args: ["-p", "-o", "json"],
+    input: "hello",
+    cwd: dir,
+    timeoutMs: 30_000,
+    env: {
+      ...process.env,
+      FAKE_QODER_MODE: "huge-err",
+      FAKE_QODER_ERR_BYTES: String(MAX_STDERR_BYTES + 7),
+    },
+  })
+
+  assert.equal(run.stderrTruncated, true)
+  assert.equal(Buffer.byteLength(run.stderr, "utf8"), MAX_STDERR_BYTES)
+  assert.equal(run.stdout.includes('"type":"result"'), true)
+  assert.equal(run.code, 0)
+})
+
+test("killTree on Windows runs taskkill /pid <pid> /t /f", () => {
+  const calls: Array<[string, string[]]> = []
+  const taskkill = new EventEmitter()
+  const signals: string[] = []
+  const child = { pid: 4242, kill: (signal: string) => signals.push(signal) }
+
+  killTree(child as never, {
+    platform: "win32",
+    spawnProcess: ((command: string, args: string[]) => {
+      calls.push([command, args])
+      return taskkill
+    }) as never,
+  })
+
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0], ["taskkill", ["/pid", "4242", "/t", "/f"]])
+
+  taskkill.emit("error", new Error("taskkill is not available"))
+  assert.deepEqual(signals, ["SIGKILL"])
+})
+
+test("killTree falls back to child.kill when spawning taskkill throws", () => {
+  const signals: string[] = []
+  const child = { pid: 4242, kill: (signal: string) => signals.push(signal) }
+
+  killTree(child as never, {
+    platform: "win32",
+    spawnProcess: (() => {
+      throw new Error("spawn EPERM")
+    }) as never,
+  })
+
+  assert.deepEqual(signals, ["SIGKILL"])
 })

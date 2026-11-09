@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process"
 
 /** Maximum number of stdout bytes kept from a CLI run. */
-const MAX_STDOUT_BYTES = 32 * 1024 * 1024
+export const MAX_STDOUT_BYTES = 32 * 1024 * 1024
 /** Maximum number of stderr bytes kept from a CLI run. */
-const MAX_STDERR_BYTES = 8 * 1024
+export const MAX_STDERR_BYTES = 8 * 1024
 
 /**
  * Build the Qoder CLI arguments for a single completion.
@@ -36,7 +36,7 @@ export function buildCliArgs({ modelID, cwd, permissionMode } = {}) {
  * @param {number} [options.timeoutMs] Kill the process tree after this many ms.
  * @param {AbortSignal} [options.signal] Aborts the run and kills the process tree.
  * @param {Record<string, string | undefined>} [options.env]
- * @returns {Promise<{ code: number|null, stdout: string, stderr: string, durationMs: number, timedOut: boolean, aborted: boolean }>}
+ * @returns {Promise<{ code: number|null, stdout: string, stderr: string, durationMs: number, timedOut: boolean, aborted: boolean, stdoutTruncated: boolean, stderrTruncated: boolean }>}
  */
 export function runCli({ cliPath, args, input, cwd, timeoutMs, signal, env = process.env } = {}) {
   return new Promise((resolve, reject) => {
@@ -54,10 +54,13 @@ export function runCli({ cliPath, args, input, cwd, timeoutMs, signal, env = pro
       return
     }
 
-    let stdout = ""
-    let stderr = ""
+    // Fixed-capacity buffers bound retained memory even when one chunk exceeds a limit.
+    const stdoutBuffer = Buffer.allocUnsafe(MAX_STDOUT_BYTES)
+    const stderrBuffer = Buffer.allocUnsafe(MAX_STDERR_BYTES)
     let stdoutBytes = 0
     let stderrBytes = 0
+    let stdoutTruncated = false
+    let stderrTruncated = false
     let timedOut = false
     let aborted = false
     let settled = false
@@ -85,19 +88,22 @@ export function runCli({ cliPath, args, input, cwd, timeoutMs, signal, env = pro
       if (signal) signal.removeEventListener("abort", onAbort)
     }
 
-    child.stdout.setEncoding("utf8")
-    child.stderr.setEncoding("utf8")
-
     child.stdout.on("data", (chunk) => {
-      if (stdoutBytes >= MAX_STDOUT_BYTES) return
-      stdoutBytes += Buffer.byteLength(chunk, "utf8")
-      stdout += chunk
+      const kept = Math.min(chunk.length, MAX_STDOUT_BYTES - stdoutBytes)
+      if (kept > 0) {
+        chunk.copy(stdoutBuffer, stdoutBytes, 0, kept)
+        stdoutBytes += kept
+      }
+      if (kept < chunk.length) stdoutTruncated = true
     })
 
     child.stderr.on("data", (chunk) => {
-      if (stderrBytes >= MAX_STDERR_BYTES) return
-      stderrBytes += Buffer.byteLength(chunk, "utf8")
-      stderr += chunk
+      const kept = Math.min(chunk.length, MAX_STDERR_BYTES - stderrBytes)
+      if (kept > 0) {
+        chunk.copy(stderrBuffer, stderrBytes, 0, kept)
+        stderrBytes += kept
+      }
+      if (kept < chunk.length) stderrTruncated = true
     })
 
     child.on("error", (error) => {
@@ -113,11 +119,13 @@ export function runCli({ cliPath, args, input, cwd, timeoutMs, signal, env = pro
       cleanup()
       resolve({
         code,
-        stdout,
-        stderr,
+        stdout: stdoutBuffer.subarray(0, stdoutBytes).toString("utf8"),
+        stderr: stderrBuffer.subarray(0, stderrBytes).toString("utf8"),
         durationMs: Date.now() - startedAt,
         timedOut,
         aborted,
+        stdoutTruncated,
+        stderrTruncated,
       })
     })
 
@@ -159,20 +167,26 @@ export function parseCliResult(stdout) {
 }
 
 /** Kill the CLI and every process it spawned. */
-export function killTree(child) {
+export function killTree(child, { platform = process.platform, spawnProcess = spawn } = {}) {
   if (!child || !child.pid) return
-  if (process.platform === "win32") {
+  const fallback = () => {
     try {
       child.kill("SIGKILL")
     } catch {}
+  }
+  if (platform === "win32") {
+    try {
+      const taskkill = spawnProcess("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" })
+      taskkill.once("error", fallback)
+    } catch {
+      fallback()
+    }
     return
   }
   try {
     process.kill(-child.pid, "SIGKILL")
   } catch {
-    try {
-      child.kill("SIGKILL")
-    } catch {}
+    fallback()
   }
 }
 

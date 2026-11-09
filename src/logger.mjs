@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs"
+import { appendFileSync, chmodSync, mkdirSync, readFileSync } from "node:fs"
 import { dirname } from "node:path"
 
 /**
@@ -7,6 +7,9 @@ import { dirname } from "node:path"
  * The log never contains the prompt, the prompt answer or any credential:
  * only the model, the credit consumption and the outcome.
  *
+ * The log directory is private (0700) and the log file itself is never
+ * group/world readable (0600), including files created by older versions.
+ *
  * @param {string} file
  * @param {Record<string, any>} entry
  * @returns {void}
@@ -14,8 +17,13 @@ import { dirname } from "node:path"
 export function appendCallLog(file, entry) {
   if (!file) return
   try {
-    mkdirSync(dirname(file), { recursive: true })
-    appendFileSync(file, `${JSON.stringify(entry)}\n`, "utf8")
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
+    appendFileSync(file, `${JSON.stringify(entry)}\n`, { encoding: "utf8", mode: 0o600 })
+    try {
+      chmodSync(file, 0o600)
+    } catch {
+      // Best effort: a foreign file owner may refuse the chmod.
+    }
   } catch {
     // Logging must never break a model call.
   }

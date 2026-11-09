@@ -1,4 +1,4 @@
-import { runCli } from "./cli.mjs"
+import { MAX_STDOUT_BYTES, runCli } from "./cli.mjs"
 import { parseModelList } from "./models.mjs"
 
 /**
@@ -11,13 +11,20 @@ import { parseModelList } from "./models.mjs"
  * @returns {Promise<Array<{ name: string, modelID: string }>>}
  */
 export async function fetchModelList({ cliPath, cwd, timeoutMs } = {}) {
+  const discoveryTimeoutMs = Math.min(timeoutMs ?? 60_000, 60_000)
   const run = await runCli({
     cliPath,
     args: ["--list-models"],
     cwd,
-    timeoutMs: timeoutMs ?? 60_000,
+    timeoutMs: discoveryTimeoutMs,
   })
 
+  if (run.timedOut) {
+    throw new Error(`qoderclicn --list-models timed out after ${discoveryTimeoutMs} ms.`)
+  }
+  if (run.stdoutTruncated) {
+    throw new Error(`qoderclicn --list-models stdout exceeded the ${MAX_STDOUT_BYTES} byte limit and was truncated.`)
+  }
   if (run.code !== 0) {
     const details = run.stderr.trim().length > 0 ? run.stderr.trim().slice(0, 500) : `exit code ${run.code}`
     const error = new Error(`qoderclicn --list-models failed: ${details}`)

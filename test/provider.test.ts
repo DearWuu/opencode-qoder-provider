@@ -5,8 +5,9 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 
+import { MAX_STDOUT_BYTES } from "../src/cli.mjs"
+import { DEFAULT_PERMISSION_MODE, MAX_PROMPT_BYTES } from "../src/options.mjs"
 import { createQoder } from "../src/provider.mjs"
-import { MAX_PROMPT_BYTES } from "../src/options.mjs"
 import { ModelFallbackError } from "../src/result.mjs"
 
 const FAKE_CLI = fileURLToPath(new URL("./fixtures/fake-qoder.mjs", import.meta.url))
@@ -261,4 +262,162 @@ test("a missing CLI binary produces an actionable error", async () => {
   const { provider } = makeProvider({ cliPath: join(tempDir(), "missing-cli") })
   const model = provider.languageModel("Auto")
   await assert.rejects(model.doGenerate({ prompt: PROMPT }), /Qoder CLI not found/)
+})
+
+async function waitForExit(pid: number, timeoutMs = 5000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0)
+    } catch {
+      return true
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25))
+  }
+  return false
+}
+
+async function waitForFile(file: string, timeoutMs = 5000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (existsSync(file)) return true
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25))
+  }
+  return false
+}
+
+function readLogged(logFile: string): Array<Record<string, unknown>> {
+  if (!existsSync(logFile)) return []
+  return readFileSync(logFile, "utf8")
+    .trim()
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+}
+
+test("cancelling doStream kills the CLI and produces no result log", async () => {
+  const { provider, dir, logFile } = makeProvider()
+  const model = provider.languageModel("Auto")
+  const pidFile = join(dir, "cli.pid")
+  const resultFile = join(dir, "cli-answered")
+  const previous = process.env.FAKE_QODER_MODE
+  process.env.FAKE_QODER_MODE = "slow"
+  process.env.FAKE_QODER_PID_FILE = pidFile
+  process.env.FAKE_QODER_RESULT_FILE = resultFile
+  process.env.FAKE_QODER_DELAY_MS = "8000"
+  try {
+    const { stream } = await model.doStream({ prompt: PROMPT })
+    const reader = (stream as unknown as ReadableStream).getReader()
+    const first = await reader.read()
+    assert.equal(first.value!.type, "stream-start")
+    assert.equal(await waitForFile(pidFile), true, "the fake CLI never started")
+    const pid = Number(readFileSync(pidFile, "utf8"))
+
+    await reader.cancel("user stopped")
+
+    // Nothing else may arrive after the cancel.
+    const next = await reader.read()
+    assert.equal(next.done, true)
+
+    assert.equal(await waitForExit(pid), true, "the fake CLI process tree survived the cancel")
+    assert.equal(existsSync(resultFile), false)
+
+    const logged = readLogged(logFile)
+    assert.equal(logged.filter((entry) => entry.isError !== true).length, 0)
+    for (const entry of logged) assert.equal(entry.aborted, true)
+  } finally {
+    if (previous === undefined) delete process.env.FAKE_QODER_MODE
+    else process.env.FAKE_QODER_MODE = previous
+    delete process.env.FAKE_QODER_PID_FILE
+    delete process.env.FAKE_QODER_RESULT_FILE
+    delete process.env.FAKE_QODER_DELAY_MS
+  }
+})
+
+test("an external abortSignal stops doStream with an abort error part only", async () => {
+  const { provider, dir, logFile } = makeProvider()
+  const model = provider.languageModel("Auto")
+  const pidFile = join(dir, "cli.pid")
+  const resultFile = join(dir, "cli-answered")
+  const previous = process.env.FAKE_QODER_MODE
+  process.env.FAKE_QODER_MODE = "slow"
+  process.env.FAKE_QODER_PID_FILE = pidFile
+  process.env.FAKE_QODER_RESULT_FILE = resultFile
+  process.env.FAKE_QODER_DELAY_MS = "8000"
+  try {
+    const controller = new AbortController()
+    const { stream } = await model.doStream({ prompt: PROMPT, abortSignal: controller.signal })
+    const reader = (stream as unknown as ReadableStream).getReader()
+    const first = await reader.read()
+    assert.equal(first.value!.type, "stream-start")
+    assert.equal(await waitForFile(pidFile), true, "the fake CLI never started")
+    const pid = Number(readFileSync(pidFile, "utf8"))
+
+    controller.abort()
+
+    const error = await reader.read()
+    assert.equal(error.done, false)
+    assert.equal(error.value!.type, "error")
+    assert.equal((error.value!.error as Error).name, "AbortError")
+    const end = await reader.read()
+    assert.equal(end.done, true)
+
+    assert.equal(await waitForExit(pid), true, "the fake CLI process tree survived the abort")
+    assert.equal(existsSync(resultFile), false)
+
+    const logged = readLogged(logFile)
+    assert.equal(logged.filter((entry) => entry.isError !== true).length, 0)
+    for (const entry of logged) assert.equal(entry.aborted, true)
+  } finally {
+    if (previous === undefined) delete process.env.FAKE_QODER_MODE
+    else process.env.FAKE_QODER_MODE = previous
+    delete process.env.FAKE_QODER_PID_FILE
+    delete process.env.FAKE_QODER_RESULT_FILE
+    delete process.env.FAKE_QODER_DELAY_MS
+  }
+})
+
+test("a truncated stdout fails the call instead of returning partial output", async () => {
+  const { provider, logFile } = makeProvider()
+  const model = provider.languageModel("Auto")
+  const previous = process.env.FAKE_QODER_MODE
+  process.env.FAKE_QODER_MODE = "huge-out"
+  process.env.FAKE_QODER_OUT_BYTES = String(MAX_STDOUT_BYTES + 5)
+  try {
+    await assert.rejects(
+      model.doGenerate({ prompt: PROMPT }),
+      new RegExp(`stdout exceeded the ${MAX_STDOUT_BYTES} byte limit and was truncated`),
+    )
+    const logged = readLogged(logFile)
+    assert.equal(logged.length, 1)
+    assert.equal(logged[0]!.isError, true)
+    assert.equal(logged[0]!.aborted, undefined)
+  } finally {
+    if (previous === undefined) delete process.env.FAKE_QODER_MODE
+    else process.env.FAKE_QODER_MODE = previous
+    delete process.env.FAKE_QODER_OUT_BYTES
+  }
+})
+
+test("without an explicit permissionMode the CLI is pinned to the built-in default", async () => {
+  const { provider, dir } = makeProvider()
+  const model = provider.languageModel("Auto")
+  const record = join(dir, "record.json")
+  const previousMode = process.env.FAKE_QODER_MODE
+  const previousPermission = process.env.QODER_PERMISSION_MODE
+  const previousRecord = process.env.FAKE_QODER_RECORD
+  process.env.FAKE_QODER_MODE = "ok"
+  process.env.FAKE_QODER_RECORD = record
+  delete process.env.QODER_PERMISSION_MODE
+  try {
+    await model.doGenerate({ prompt: PROMPT })
+    const argv = (JSON.parse(readFileSync(record, "utf8")) as { argv: string[] }).argv
+    assert.equal(argv[argv.indexOf("--permission-mode") + 1], DEFAULT_PERMISSION_MODE)
+  } finally {
+    if (previousMode === undefined) delete process.env.FAKE_QODER_MODE
+    else process.env.FAKE_QODER_MODE = previousMode
+    if (previousRecord === undefined) delete process.env.FAKE_QODER_RECORD
+    else process.env.FAKE_QODER_RECORD = previousRecord
+    if (previousPermission !== undefined) process.env.QODER_PERMISSION_MODE = previousPermission
+  }
 })

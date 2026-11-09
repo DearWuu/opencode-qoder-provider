@@ -34,14 +34,16 @@ export const QoderProviderPlugin = Plugin.define({
     const providerFile = fileURLToPath(new URL("./provider.mjs", import.meta.url))
     const providerPackage = `aisdk:${pathToFileURL(providerFile).href}`
 
-    const options = safeResolveOptions(ctx)
+    const options = resolveOptions({ ...(ctx.options ?? {}), cwd: ctx.location?.directory })
     const sdk = createQoder(options)
 
     let catalog: CatalogEntry[] = PLACEHOLDER_CATALOG
     let discoveryError: string | undefined
     let cliVersion: string | undefined
+    let discoveryGeneration = 0
 
     const discover = async () => {
+      const generation = ++discoveryGeneration
       try {
         const entries = await fetchModelList({
           cliPath: options.cliPath,
@@ -49,11 +51,15 @@ export const QoderProviderPlugin = Plugin.define({
           timeoutMs: options.timeoutMs,
         })
         const built = buildModelCatalog(entries)
-        if (built.length > 0) catalog = built
+        if (built.length === 0) throw new Error("Qoder CLI returned an empty model catalog.")
+        if (generation !== discoveryGeneration) return false
+        catalog = built
         discoveryError = undefined
         return true
       } catch (error) {
-        discoveryError = error instanceof Error ? error.message : String(error)
+        if (generation === discoveryGeneration) {
+          discoveryError = error instanceof Error ? error.message : String(error)
+        }
         return false
       }
     }
@@ -137,13 +143,6 @@ export const QoderProviderPlugin = Plugin.define({
   },
 })
 
-function safeResolveOptions(ctx: { options?: Record<string, unknown>; location?: { directory?: string } }) {
-  try {
-    return resolveOptions({ ...(ctx.options ?? {}), cwd: ctx.location?.directory })
-  } catch {
-    return resolveOptions({ cwd: ctx.location?.directory })
-  }
-}
 
 function buildProviderInfo(providerPackage: string): Provider.Info {
   return {

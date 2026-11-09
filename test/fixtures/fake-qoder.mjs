@@ -8,14 +8,26 @@
  *  - `-p -o json` reads the prompt from stdin and prints one JSON result object.
  *
  * Behaviour is controlled through environment variables:
- *  - FAKE_QODER_RECORD   path of the file that receives {argv, stdin, stdinBytes}
- *  - FAKE_QODER_MODE     ok | error | usage-auto | fallback | fallback-quoted | hang | not-json | crash
- *  - FAKE_QODER_MODELS   newline separated model list for --list-models
+ *  - FAKE_QODER_RECORD        path of the file that receives {argv, stdin, stdinBytes}
+ *  - FAKE_QODER_PID_FILE      path of the file that receives the process pid
+ *  - FAKE_QODER_MODE          ok | error | usage-auto | fallback | fallback-quoted |
+ *                             hang | slow | huge-out | huge-err | not-json | crash
+ *  - FAKE_QODER_MODELS        newline separated model list for --list-models
+ *  - FAKE_QODER_DISCOVERY_DELAY_MS  ms to wait before answering --list-models
+ *  - FAKE_QODER_LIST_OUT_BYTES      extra stdout padding bytes for --list-models
+ *  - FAKE_QODER_DELAY_MS            ms `slow` waits before answering (default 5000)
+ *  - FAKE_QODER_RESULT_FILE         written only when `slow` gets to answer
+ *  - FAKE_QODER_OUT_BYTES           stdout padding for `huge-out`
+ *  - FAKE_QODER_ERR_BYTES           stderr padding for `huge-err`
  */
 import { writeFileSync } from "node:fs"
 
 const argv = process.argv.slice(2)
 const mode = process.env.FAKE_QODER_MODE ?? "ok"
+
+if (process.env.FAKE_QODER_PID_FILE) {
+  writeFileSync(process.env.FAKE_QODER_PID_FILE, String(process.pid))
+}
 
 function argValue(flag) {
   const index = argv.indexOf(flag)
@@ -28,49 +40,28 @@ function record(payload) {
   writeFileSync(file, JSON.stringify(payload, null, 2))
 }
 
-if (argv.includes("--list-models")) {
-  const models = (process.env.FAKE_QODER_MODELS ?? "Auto\nFast\nQwen3.8-Max")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-  process.stdout.write(["MODEL", ...models].join("\n") + "\n")
-  process.exit(0)
+/** Write exactly `bytes` padding to stdout (fd 1) or stderr (fd 2), honouring backpressure. */
+async function fill(stream, bytes, char = "x") {
+  const chunk = Buffer.alloc(Math.min(bytes, 64 * 1024), char)
+  let remaining = bytes
+  while (remaining > 0) {
+    const slice = chunk.subarray(0, Math.min(chunk.length, remaining))
+    remaining -= slice.length
+    if (stream.write(slice)) continue
+    await new Promise((resolve) => stream.once("drain", resolve))
+  }
 }
 
-if (argv.includes("--version")) {
-  process.stdout.write("1.1.85\n")
-  process.exit(0)
+function positiveNumberEnv(name) {
+  const raw = process.env[name]
+  if (raw === undefined || raw === "") return 0
+  const value = Number(raw)
+  return Number.isFinite(value) && value > 0 ? value : 0
 }
 
-let stdin = ""
-process.stdin.setEncoding("utf8")
-process.stdin.on("data", (chunk) => {
-  stdin += chunk
-})
-process.stdin.on("end", () => {
-  record({ argv, stdin, stdinBytes: Buffer.byteLength(stdin, "utf8") })
-
-  if (mode === "hang") {
-    setInterval(() => {}, 1000)
-    return
-  }
-  if (mode === "not-json") {
-    process.stdout.write("this is not json\n")
-    process.exit(0)
-  }
-  if (mode === "crash") {
-    process.stderr.write("fatal: qoder exploded\n")
-    process.exit(1)
-  }
-
-  const requested = argValue("--model") ?? "Auto"
-  if (mode === "fallback") {
-    process.stderr.write("Model efficient is not available, falling back to auto instead\n")
-  } else if (mode === "fallback-quoted") {
-    process.stderr.write('Model "efficient" is not available, using "auto" instead\n')
-  }
+function resultPayload(requested) {
   const actual = ["usage-auto", "fallback", "fallback-quoted"].includes(mode) ? "auto" : requested.toLowerCase()
-  const payload = {
+  return {
     type: "result",
     subtype: "success",
     duration_ms: 42,
@@ -104,6 +95,95 @@ process.stdin.on("end", () => {
     uuid: "fake-uuid",
     session_id: "fake-session",
   }
-  process.stdout.write(JSON.stringify(payload) + "\n")
+}
+
+/** Resolve once everything queued on the stream has been flushed to the pipe. */
+function flush(stream) {
+  return new Promise((resolve) => stream.write("", resolve))
+}
+
+if (argv.includes("--list-models")) {
+  const models = (process.env.FAKE_QODER_MODELS ?? "Auto\nFast\nQwen3.8-Max")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+  const list = ["MODEL", ...models].join("\n") + "\n"
+  const padding = positiveNumberEnv("FAKE_QODER_LIST_OUT_BYTES")
+  const delay = positiveNumberEnv("FAKE_QODER_DISCOVERY_DELAY_MS")
+  const answer = async () => {
+    process.stdout.write(list)
+    if (padding > 0) {
+      await fill(process.stdout, padding)
+      await flush(process.stdout)
+    }
+    process.exit(0)
+  }
+  if (delay > 0) setTimeout(() => void answer(), delay)
+  else void answer()
+} else if (argv.includes("--version")) {
+  process.stdout.write("1.1.85\n")
   process.exit(0)
-})
+} else {
+  let stdin = ""
+  process.stdin.setEncoding("utf8")
+  process.stdin.on("data", (chunk) => {
+    stdin += chunk
+  })
+  process.stdin.on("end", () => {
+    record({ argv, stdin, stdinBytes: Buffer.byteLength(stdin, "utf8") })
+
+    if (mode === "hang") {
+      setInterval(() => {}, 1000)
+      return
+    }
+    if (mode === "slow") {
+      const delay = positiveNumberEnv("FAKE_QODER_DELAY_MS") || 5000
+      setTimeout(() => {
+        if (process.env.FAKE_QODER_RESULT_FILE) {
+          writeFileSync(process.env.FAKE_QODER_RESULT_FILE, "answered")
+        }
+        process.stdout.write(JSON.stringify(resultPayload(argValue("--model") ?? "Auto")) + "\n")
+        process.exit(0)
+      }, delay)
+      return
+    }
+    if (mode === "huge-err") {
+      void (async () => {
+        await fill(process.stderr, positiveNumberEnv("FAKE_QODER_ERR_BYTES"), "e")
+        await flush(process.stderr)
+        finishQuietly()
+      })()
+      return
+    }
+    if (mode === "huge-out") {
+      void (async () => {
+        await fill(process.stdout, positiveNumberEnv("FAKE_QODER_OUT_BYTES"))
+        await flush(process.stdout)
+        process.exit(0)
+      })()
+      return
+    }
+    finishQuietly()
+  })
+}
+
+/** Ordinary (non-huge) result path. */
+function finishQuietly() {
+  if (mode === "not-json") {
+    process.stdout.write("this is not json\n")
+    process.exit(0)
+  }
+  if (mode === "crash") {
+    process.stderr.write("fatal: qoder exploded\n")
+    process.exit(1)
+  }
+
+  const requested = argValue("--model") ?? "Auto"
+  if (mode === "fallback") {
+    process.stderr.write("Model efficient is not available, falling back to auto instead\n")
+  } else if (mode === "fallback-quoted") {
+    process.stderr.write('Model "efficient" is not available, using "auto" instead\n')
+  }
+  process.stdout.write(JSON.stringify(resultPayload(requested)) + "\n")
+  process.exit(0)
+}
