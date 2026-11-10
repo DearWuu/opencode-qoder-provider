@@ -37,6 +37,29 @@ test("buildLogEntry keeps only metadata, never the prompt", () => {
   assert.equal("token" in entry, false)
 })
 
+test("buildLogEntry carries only non-sensitive lifecycle diagnostics", () => {
+  const entry = buildLogEntry({
+    requestedModel: "Auto",
+    timeoutKind: "idle",
+    lastEventType: "stderr",
+    lastEventAgoMs: 12,
+    sawStdout: true,
+    sawStderr: true,
+    sawTextDelta: false,
+    sawResult: false,
+  })
+  assert.equal(entry.timeoutKind, "idle")
+  assert.equal(entry.lastEventType, "stderr")
+  assert.equal(entry.lastEventAgoMs, 12)
+  assert.equal(entry.sawStdout, true)
+  assert.equal(entry.sawStderr, true)
+  assert.equal(entry.sawTextDelta, false)
+  assert.equal(entry.sawResult, false)
+  for (const forbidden of ["prompt", "stdout", "stderr", "text", "token", "authorization"]) {
+    assert.equal(forbidden in entry, false)
+  }
+})
+
 test("appendCallLog writes JSON lines and creates the directory", () => {
   const file = tempFile()
   appendCallLog(file, buildLogEntry({ requestedModel: "Auto", credits: 0.5, durationMs: 10 }))
@@ -82,7 +105,7 @@ test("appendCallLog keeps the log private: directory 0700, file 0600", (t) => {
   assert.equal(statSync(dirname(file)).mode & 0o777, 0o700)
   assert.equal(statSync(file).mode & 0o777, 0o600)
 
-  // A world-readable file created by an older version is tightened best effort.
+  // 旧版本创建的全局可读文件会被尽力收紧权限。
   chmodSync(file, 0o644)
   appendCallLog(file, buildLogEntry({ requestedModel: "Fast", credits: 0.25 }))
   assert.equal(statSync(file).mode & 0o777, 0o600)

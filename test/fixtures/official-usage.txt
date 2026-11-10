@@ -1,0 +1,9 @@
+Qoder CLI CN · Usage Status
+API quota and session token usage for the current conversation.
+QoderCNPlan:Enterprise
+PlanExpiresAt:Nov20,2026,00:00:00GMT+8
+PlanCreditsUsed:N/A
+Add-onCreditsUsed:N/A
+OrgResourcePackage:6872/10000
+TotalDuration(API):0.0s
+Tab/←→switch·Escback

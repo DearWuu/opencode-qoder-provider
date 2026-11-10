@@ -1,3 +1,8 @@
+/**
+ * 文件职责：OpenCode 服务端插件入口：注册 Qoder provider 与模型目录、`/qoder` 命令、`qoder` RPC。
+ * 上游：OpenCode 插件加载器调用 QoderProviderPlugin.setup。
+ * 下游：src/catalog、src/command、src/logger、src/models、src/options、src/provider、src/quota、src/stats、rpc.ts、provider.mjs。
+ */
 import { Plugin } from "@opencode/plugin"
 import type { Model } from "@opencode/schema/model"
 import type { Provider } from "@opencode/schema/provider"
@@ -9,15 +14,15 @@ import { readCallLog } from "./src/logger.mjs"
 import { buildModelCatalog } from "./src/models.mjs"
 import { PROVIDER_ID, PROVIDER_NAME, resolveOptions } from "./src/options.mjs"
 import { createQoder } from "./src/provider.mjs"
+import { createQuotaStore, formatQuotaStatus } from "./src/quota.mjs"
 import { computeQoderStats } from "./src/stats.mjs"
 import { QoderRpc } from "./rpc.ts"
 
 const PLUGIN_ID = "opencode-qoder-provider"
 
 /**
- * Catalog that is registered when the Qoder CLI is missing or not logged in.
- * The models stay selectable so the user gets an actionable error instead of a
- * missing model.
+ * CLI 缺失或未登录时注册的占位目录：模型仍可选中，让用户拿到可执行的报错，
+ * 而不是整个 provider 没有模型可选。
  */
 const PLACEHOLDER_CATALOG = [
   { id: "auto", modelID: "Auto", name: "Auto" },
@@ -38,6 +43,12 @@ export const QoderProviderPlugin = Plugin.define({
 
     const options = resolveOptions({ ...(ctx.options ?? {}), cwd: ctx.location?.directory })
     const sdk = createQoder(options)
+    const readUsage = (ctx.options as any)?.readUsage
+    const quotaStore = createQuotaStore({
+      cliPath: options.cliPath,
+      cwd: options.cwd,
+      readUsage: typeof readUsage === "function" ? readUsage : undefined,
+    })
 
     let catalog: CatalogEntry[] = PLACEHOLDER_CATALOG
     let discoveryError: string | undefined
@@ -74,10 +85,9 @@ export const QoderProviderPlugin = Plugin.define({
     }
 
     /**
-     * Single implementation of the `/qoder` command.
+     * `/qoder` 命令的唯一实现。
      *
-     * The server command and the `qoder` RPC contract both call it, so the
-     * TUI dialog and the API answer can never drift apart.
+     * 服务端命令与 `qoder` RPC 契约都调用它，保证 TUI dialog 与 API 的回答不会各写一套。
      */
     const executeQoderCommand = async (text: string): Promise<string> => {
       const subcommand = parseSubcommand(text)
@@ -85,18 +95,22 @@ export const QoderProviderPlugin = Plugin.define({
       if (subcommand === "refresh") {
         const ok = await discover()
         await ctx.provider.reload()
-        return ok
+        const quota = await quotaStore.read({ refresh: true })
+        const catalogText = ok
           ? `Refreshed the Qoder model catalog: ${catalog.length} models (${preview(catalog)}).`
           : `Could not refresh the Qoder model catalog: ${discoveryError}\nThe previous catalog (${preview(catalog)}) stays active.`
+        return `${catalogText}\n${formatQuotaStatus(quota)}`
       }
       if (subcommand === "models") return buildModelsText(catalog, discoveryError)
       if (subcommand === "login") return buildLoginText(options.cliPath)
-      if (subcommand === "status") return buildStatusText(options, catalog, discoveryError, cliVersion)
+      if (subcommand === "status") {
+        const quota = await quotaStore.read({ refresh: true })
+        return `${buildStatusText(options, catalog, discoveryError, cliVersion)}\n${formatQuotaStatus(quota)}`
+      }
       return buildUsageText()
     }
 
-    // OpenCode resolves the `aisdk:` package through this hook and then calls
-    // `sdk.languageModel(modelID)`.
+    // OpenCode 通过这个 hook 解析 `aisdk:` 包路径，随后调用 `sdk.languageModel(modelID)`。
     await ctx.aisdk.hook(
       "sdk",
       (input) => {
@@ -119,8 +133,8 @@ export const QoderProviderPlugin = Plugin.define({
         execute: async (input) => {
           const text = await executeQoderCommand(input.prompt.text)
 
-          // `resume: false` keeps the message in the session inbox without waking
-          // the session: a local status command must never start a model call.
+          // `resume: false` 让消息只留在 session inbox 而不唤醒会话：
+          // 本地状态命令绝不能触发模型调用。
           await ctx.session.synthetic({
             sessionID: input.sessionID,
             text,
@@ -131,15 +145,14 @@ export const QoderProviderPlugin = Plugin.define({
       })
     })
 
-    // The TUI part calls this contract to show the answer in a dialog and to
-    // feed the sidebar credits panel.
+    // TUI 侧调用这份契约把回答显示在 dialog 里，并为侧边栏 Credits 面板取数。
     const rpcRegistration = await ctx.rpc.register(QoderRpc, {
       execute: async (input) => {
         const { text } = input as { text: string }
         return { text: await executeQoderCommand(text) }
       },
       stats: async () => {
-        // Read-only aggregation of the local call log: no model, no network.
+        // 只读聚合本地调用日志：不调模型、不读取官方配额。
         const entries = readCallLog(options.logFile, 100_000)
         return computeQoderStats(entries, {
           provider: PROVIDER_ID,
@@ -149,9 +162,13 @@ export const QoderProviderPlugin = Plugin.define({
           cliVersion: cliVersion ?? "",
         })
       },
+      quota: async (input) => quotaStore.read({
+        refresh: (input as { refresh?: boolean }).refresh === true,
+      }),
     })
 
     return async () => {
+      quotaStore.dispose()
       await rpcRegistration.dispose()
     }
   },

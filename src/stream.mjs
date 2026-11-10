@@ -1,17 +1,21 @@
+/**
+ * 文件职责：`-o stream-json --include-partial-messages` 输出的增量解析器，产出文本/推理块的开始、增量、结束回调与最终 result。
+ * 上游：src/provider 的 doStream。
+ * 下游：node:string_decoder。
+ */
 import { StringDecoder } from "node:string_decoder"
 
 /**
- * Incremental parser for `qoderclicn -o stream-json --include-partial-messages`.
+ * `qoderclicn -o stream-json --include-partial-messages` 的增量解析器。
  *
- * The CLI prints one JSON object per line:
- *  - `system` init/diagnostic events (ignored)
- *  - `stream_event` wrappers carrying Anthropic-style raw events
- *    (`content_block_start` / `content_block_delta` / `content_block_stop` …)
- *  - one final `result` event carrying usage and credits
- *  - a full `assistant` message that repeats already streamed text (ignored)
+ * CLI 每行打印一个 JSON 对象：
+ *  - `system` 初始化/诊断事件（忽略）
+ *  - `stream_event` 包装层，内含 Anthropic 风格的原始事件
+ *    （`content_block_start` / `content_block_delta` / `content_block_stop` …）
+ *  - 一个最终的 `result` 事件，携带用量与 Credits
+ *  - 一条完整的 `assistant` 消息，重复已流式输出的文本（忽略）
  *
- * Unknown event types and non-JSON lines are ignored; a missing `result` is
- * detected by the caller (parser.result stays null).
+ * 未知事件类型与非 JSON 行一律忽略；缺失 `result` 由调用方检测（parser.result 保持 null）。
  *
  * @param {{
  *   onTextStart?: (index: number) => void,

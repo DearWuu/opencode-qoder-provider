@@ -1,21 +1,30 @@
-/** Poll interval of the sidebar credits panel. */
-export const STATS_POLL_INTERVAL_MS = 15_000
+/**
+ * 文件职责：Credits 面板的纯格式化：数值、相对时间、面板行（含错误/加载态）。
+ * 上游：panel.tsx 渲染面板行、src/quota 的 status 文案、test/credits.test.ts。
+ * 下游：无（纯函数）。
+ */
+
+/** 官方额度与本地消耗共用的千分位数值格式。 */
+export function formatQuotaNumber(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "0"
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(value)
+}
 
 /**
- * Format a credit sum compactly: at most two decimals, trailing zeros removed.
+ * Today Credits 固定保留两位小数。
  *
  * @param {unknown} value
  * @returns {string}
  */
 export function formatCredits(value) {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "0"
-  return value.toFixed(2).replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "")
+  if (typeof value !== "number" || !Number.isFinite(value)) return "0.00"
+  return value.toFixed(2)
 }
 
 /**
- * Human readable age of a timestamp, relative to `nowMs`.
+ * 时间戳相对 `nowMs` 的可读年龄。
  *
- * @param {string} iso empty string means "no calls yet"
+ * @param {string} iso 空串表示"还没有调用"
  * @param {number} nowMs
  * @returns {string}
  */
@@ -33,79 +42,37 @@ export function formatRelativeTime(iso, nowMs) {
 }
 
 /**
- * The data lines of the credits panel (the title is rendered by the caller).
+ * Credits 面板的数据行（标题由调用方渲染）。
  *
- * The numbers are locally accumulated consumption read from the call log,
- * never an account balance. One failing poll collapses the panel into a
- * single muted error line so the TUI never shows stale data as current.
+ * Today 来自本地日志；其余两行只展示官方 `/usage` 返回的额度。
+ * 配额不可用时不沿用旧数字，也不显示 schema 中的零值占位。
  *
- * @param {{ stats: Record<string, any>|undefined, error: string|undefined, nowMs: number }} input
+ * 调用方：panel.tsx（经 createMemo 渲染面板行）。
+ *
+ * @param {{ stats: Record<string, any>|undefined, quota: Record<string, any>|undefined,
+ *   error: string|undefined, quotaError?: string|undefined, nowMs: number }} input
  * @returns {Array<{ tone: "base"|"muted"|"warning", text: string }>}
  */
 export function creditsPanelLines(input) {
   if (input.error !== undefined) return [{ tone: "muted", text: `stats unavailable: ${input.error}` }]
-  const stats = input.stats
-  if (stats === undefined) return [{ tone: "muted", text: "loading credits stats..." }]
-  const lastLine = stats.lastAt.length === 0
-    ? "Last no calls yet"
-    : `Last ${stats.lastModel.length > 0 ? stats.lastModel : "?"} ${formatCredits(stats.lastCredits)} · ${formatRelativeTime(stats.lastAt, input.nowMs)}`
-  return [
-    { tone: "muted", text: `Spent ${formatCredits(stats.totalCredits)} · ${stats.totalCalls} calls` },
-    { tone: "muted", text: `Today ${formatCredits(stats.todayCredits)} · ${stats.todayCalls} calls` },
-    { tone: stats.lastError ? "warning" : "muted", text: lastLine },
-    { tone: "muted", text: `${stats.models} models · auth ${stats.authenticated ? "ok" : "error"}` },
-  ]
+  if (input.stats === undefined) return [{ tone: "muted", text: "loading credits stats..." }]
+  const lines = [{ tone: "muted", text: `Today ${formatCredits(input.stats.todayCredits)}` }]
+  const quota = input.quota
+  if (input.quotaError !== undefined || (quota && !quota.available)) {
+    lines.push({ tone: "muted", text: "Quota unavailable" })
+    return lines
+  }
+  if (quota === undefined) {
+    lines.push({ tone: "muted", text: "Quota loading..." })
+    return lines
+  }
+  lines.push({ tone: "muted", text: `${formatQuotaNumber(quota.used)} / ${formatQuotaNumber(quota.total)}（已使用 ${quota.percentage}%）` })
+  lines.push({ tone: "muted", text: `剩余 ${formatQuotaNumber(quota.remaining)} · 距离重置还有 ${daysUntil(quota.expiresAt, input.nowMs)} 天` })
+  return lines
 }
 
-/**
- * Repeatedly poll an async source on a fixed interval.
- *
- * The first fetch starts immediately; every completion (or failure) schedules
- * the next one. Timers are injectable so tests can advance time without
- * waiting. `stop()` cancels the pending timer and any in-flight completion.
- * Rejections of `fetch` never break the schedule: the source owns its error
- * reporting, this is only a timer loop.
- *
- * @param {{ fetch: () => Promise<unknown>, intervalMs?: number, setTimer?: (fn: () => void, ms: number) => any, clearTimer?: (id: any) => void }} input
- * @returns {{ start: () => void, stop: () => void }}
- */
-export function createStatsPoller(input) {
-  const intervalMs = input.intervalMs ?? STATS_POLL_INTERVAL_MS
-  const setTimer = input.setTimer ?? ((fn, ms) => setTimeout(fn, ms))
-  const clearTimer = input.clearTimer ?? ((id) => clearTimeout(id))
-
-  let timer = undefined
-  let stopped = true
-
-  function schedule() {
-    if (stopped) return
-    timer = setTimer(() => {
-      void tick()
-    }, intervalMs)
-  }
-
-  async function tick() {
-    if (stopped) return
-    try {
-      await input.fetch()
-    } catch {
-      // The fetch callback reports its own errors; a poller must never throw.
-    }
-    schedule()
-  }
-
-  return {
-    start() {
-      if (!stopped) return
-      stopped = false
-      void tick()
-    },
-    stop() {
-      stopped = true
-      if (timer !== undefined) {
-        clearTimer(timer)
-        timer = undefined
-      }
-    },
-  }
+function daysUntil(expiresAt, nowMs) {
+  const expiryMs = new Date(expiresAt).getTime()
+  if (!Number.isFinite(expiryMs)) return 0
+  return Math.max(0, Math.ceil((expiryMs - nowMs) / 86_400_000))
 }

@@ -3,10 +3,10 @@ import assert from "node:assert/strict"
 
 import { QODER_RPC_ID, QoderRpc } from "../rpc.ts"
 
-test("the RPC contract is the qoder contract with the execute and stats methods", () => {
+test("the RPC contract is the qoder contract with execute, stats and quota methods", () => {
   assert.equal(QODER_RPC_ID, "qoder")
   assert.equal(QoderRpc.id, "qoder")
-  assert.deepEqual(Object.keys(QoderRpc.methods), ["execute", "stats"])
+  assert.deepEqual(Object.keys(QoderRpc.methods), ["execute", "stats", "quota"])
 })
 
 test("the execute method takes a text and returns a text", () => {
@@ -59,8 +59,8 @@ test("the stats method takes no input and returns the stable panel fields", () =
     "lastAt",
     "lastError",
   ])
-  // Every field is required and nullable unions are forbidden: unknown
-  // values arrive as "" or 0, so panel rendering cannot hit undefined.
+  // 每个字段都必填且禁止可空联合类型：未知值以 "" 或 0 到达，
+  // 面板渲染就不会碰到 undefined。
   assert.deepEqual(output.required, Object.keys(output.properties))
   for (const [name, schema] of Object.entries(output.properties)) {
     assert.equal(typeof schema.type, "string", `${name} must be a single non-null type`)
@@ -69,6 +69,22 @@ test("the stats method takes no input and returns the stable panel fields", () =
   assert.equal(output.properties.totalCredits.type, "number")
   assert.equal(output.properties.authenticated.type, "boolean")
   assert.equal(output.properties.lastAt.type, "string")
+})
+
+test("the quota method exposes real values plus source, cache and error metadata", () => {
+  const method = QoderRpc.methods.quota as any
+  assert.deepEqual(method.input, {
+    type: "object",
+    properties: { refresh: { type: "boolean" } },
+    required: [],
+    additionalProperties: false,
+  })
+  const fields = ["available", "source", "used", "total", "remaining", "percentage", "expiresAt", "fetchedAt", "cached", "error"]
+  assert.deepEqual(Object.keys(method.output.properties), fields)
+  assert.deepEqual(method.output.required, fields)
+  assert.equal(method.output.properties.available.type, "boolean")
+  assert.equal(method.output.properties.percentage.type, "integer")
+  assert.equal(method.output.additionalProperties, false)
 })
 
 test("the RPC contract declares no events", () => {

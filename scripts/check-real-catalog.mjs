@@ -1,12 +1,10 @@
 #!/usr/bin/env node
 /**
- * Verify the model catalog against the real Qoder CLI.
+ * 文件职责：用真实 Qoder 账号校验模型目录（人工运行：node scripts/check-real-catalog.mjs [cli 路径]）。
+ * 上游：`npm run check:catalog` 或人工执行；不进入自动化测试与 CI。
+ * 下游：src/catalog、src/models、src/options。
  *
- * This helper talks to the logged-in Qoder account to read `--list-models`
- * (a free call, it does not run a model and does not consume Credits) and prints
- * the OpenCode model IDs the plugin would register.
- *
- * Usage: node scripts/check-real-catalog.mjs [path/to/qoderclicn]
+ * `--list-models` 不跑模型、不消耗 Credits。脚本打印插件会注册的 OpenCode 模型 ID。
  */
 import { fetchModelList } from "../src/catalog.mjs"
 import { buildModelCatalog } from "../src/models.mjs"

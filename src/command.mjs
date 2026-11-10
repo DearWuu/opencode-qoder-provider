@@ -1,14 +1,21 @@
+/**
+ * 文件职责：`/qoder` 子命令解析，以及 status/models/login/usage 文案的纯拼装。
+ * 上游：index.ts 的 `/qoder` 命令与 RPC execute、tui.ts 的 parseSubcommand。
+ * 下游：src/logger（读调用日志、累加 Credits）、src/options（provider 名称）。
+ */
 import { readCallLog, sumCredits } from "./logger.mjs"
 import { PROVIDER_ID, PROVIDER_NAME } from "./options.mjs"
 
 /**
- * Parse the sub command out of a `/qoder ...` invocation.
+ * 从一次 `/qoder ...` 调用里解析出子命令。
  *
- * Accepts both the raw prompt text ("/qoder refresh") and the bare sub
- * command ("refresh"), so the TUI and the server command share one parser.
+ * 同时接受原始 prompt 文本（"/qoder refresh"）和裸子命令（"refresh"），
+ * 让 TUI 与服务端命令共用同一个解析器。
+ *
+ * 调用方：index.ts 的 executeQoderCommand、tui.ts 的 runQoderCommand。
  *
  * @param {string} text
- * @returns {string} the sub command, "status" when nothing was given
+ * @returns {string} 子命令；没有给参数时为 "status"
  */
 export function parseSubcommand(text) {
   const parts = (text ?? "").trim().split(/\s+/).filter(Boolean)
@@ -20,7 +27,7 @@ export function parseSubcommand(text) {
 }
 
 /**
- * Short preview of the catalog, used in the status and refresh messages.
+ * 目录的简短预览，用于 status 与 refresh 文案。
  *
  * @param {Array<{ id: string }>} catalog
  * @param {number} [limit]
@@ -33,11 +40,11 @@ export function preview(catalog, limit = 6) {
 }
 
 /**
- * Build the `/qoder status` message.
+ * 拼出 `/qoder status` 文案。
  *
- * Reads the local call log only: no model round trip, no network call.
+ * 只读本地调用日志：不跑模型，也不联网。
  *
- * @param {{ cliPath: string, permissionMode: string, timeoutMs: number, logFile: string, cwd?: string }} options
+ * @param {{ cliPath: string, permissionMode: string, timeoutMs: number, idleTimeoutMs: number, logFile: string, cwd?: string }} options
  * @param {Array<{ id: string, modelID: string, name: string }>} catalog
  * @param {string|undefined} discoveryError
  * @param {string|undefined} cliVersion
@@ -53,7 +60,8 @@ export function buildStatusText(options, catalog, discoveryError, cliVersion) {
   )
   lines.push(`- Models: ${catalog.length} (${preview(catalog)})`)
   lines.push(`- Permission mode: ${options.permissionMode}`)
-  lines.push(`- Timeout: ${options.timeoutMs} ms`)
+  lines.push(`- Total timeout: ${options.timeoutMs} ms`)
+  lines.push(`- Idle timeout: ${options.idleTimeoutMs} ms (stdout/stderr activity resets it)`)
   lines.push(`- Working directory: ${options.cwd ?? "(inherited)"}`)
   lines.push(`- Log: ${options.logFile}`)
 
@@ -72,7 +80,7 @@ export function buildStatusText(options, catalog, discoveryError, cliVersion) {
 }
 
 /**
- * Build the `/qoder models` message.
+ * 拼出 `/qoder models` 文案。
  *
  * @param {Array<{ id: string, modelID: string, name: string }>} catalog
  * @param {string|undefined} discoveryError
@@ -92,8 +100,7 @@ export function buildModelsText(catalog, discoveryError) {
 }
 
 /**
- * Build the `/qoder login` message. The plugin never runs the interactive
- * login itself, so it only prints the instructions.
+ * 拼出 `/qoder login` 文案。插件从不代跑交互式登录，只打印指引。
  *
  * @param {string} cliPath
  * @returns {string}
@@ -111,7 +118,7 @@ export function buildLoginText(cliPath) {
 }
 
 /**
- * Build the usage message shown for an unknown sub command.
+ * 未知子命令时显示的用法文案。
  *
  * @returns {string}
  */

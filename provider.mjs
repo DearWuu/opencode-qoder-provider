@@ -1,9 +1,7 @@
 /**
- * Qoder provider runtime for OpenCode.
- *
- * OpenCode loads this module through `aisdk:file://<absolute path>` and calls the
- * `createQoder(options)` factory. The returned object exposes `languageModel(modelID)`
- * which returns an AI SDK LanguageModelV3 that drives the Qoder CLI.
+ * 文件职责：provider runtime 入口，导出 `createQoder(options)`、CLI 选项常量与兼容的 `model()`。
+ * 上游：index.ts 以 `aisdk:` 包路径交给 OpenCode，OpenCode 原生 provider 协议调用 `model()`。
+ * 下游：src/provider、src/options。
  */
 import { createLanguageModel } from "./src/provider.mjs"
 import { resolveOptions } from "./src/options.mjs"
@@ -12,6 +10,7 @@ export { createQoder, createLanguageModel } from "./src/provider.mjs"
 export {
   ALLOWED_PERMISSION_MODES,
   CLI_STDIN_LIMIT_BYTES,
+  DEFAULT_IDLE_TIMEOUT_MS,
   DEFAULT_PERMISSION_MODE,
   DEFAULT_TIMEOUT_MS,
   MAX_PROMPT_BYTES,
@@ -22,10 +21,9 @@ export {
 } from "./src/options.mjs"
 
 /**
- * Compatibility export for OpenCode's native provider protocol
- * ("Provider package <x> does not export model(modelID, settings)").
- * OpenCode itself resolves this module through the `aisdk:` package path; this
- * keeps the module usable through the plain provider protocol as well.
+ * 面向 OpenCode 原生 provider 协议的兼容导出
+ * （"Provider package <x> does not export model(modelID, settings)"）。
+ * OpenCode 正常走 `aisdk:` 包路径解析本模块；这个导出让模块同时能被纯 provider 协议使用。
  */
 export function model(modelID, settings = {}) {
   return createLanguageModel(modelID, resolveOptions(settings))

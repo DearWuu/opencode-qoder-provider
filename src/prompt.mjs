@@ -1,8 +1,13 @@
+/**
+ * 文件职责：把 AI SDK V3 prompt 拍平成纯文本，并做 UTF-8 字节上限校验与媒体类型报错。
+ * 上游：src/provider 的 doGenerate/doStream。
+ * 下游：src/options（stdin/安全上限常量）。
+ */
 import { CLI_STDIN_LIMIT_BYTES, MAX_PROMPT_BYTES } from "./options.mjs"
 
 const encoder = new TextEncoder()
 
-/** Error thrown when a prompt contains media that the Qoder CLI cannot consume. */
+/** prompt 含 Qoder CLI 无法消费的媒体内容时抛出的错误。 */
 export class UnsupportedMediaError extends Error {
   constructor(message) {
     super(message)
@@ -10,7 +15,7 @@ export class UnsupportedMediaError extends Error {
   }
 }
 
-/** Error thrown when the serialized prompt exceeds the safe stdin limit. */
+/** 序列化后的 prompt 超过安全 stdin 上限时抛出的错误。 */
 export class PromptTooLargeError extends Error {
   constructor(bytes, limit) {
     super(
@@ -24,11 +29,10 @@ export class PromptTooLargeError extends Error {
 }
 
 /**
- * Serialize an AI SDK V3 prompt into the plain text that is piped to
- * `qoderclicn` stdin.
+ * 把 AI SDK V3 prompt 序列化成写入 `qoderclicn` stdin 的纯文本。
  *
- * The Qoder CLI (1.1.85) only accepts a raw text prompt on stdin when it is not
- * using `--input-format stream-json`, so the conversation is flattened here.
+ * Qoder CLI（1.1.85）在不用 `--input-format stream-json` 时只接受原始文本 prompt，
+ * 因此在这里把对话拍平。
  *
  * @param {Array<any>} prompt
  * @returns {string}
@@ -64,7 +68,7 @@ export function serializePrompt(prompt) {
   return blocks.join("\n\n")
 }
 
-/** UTF-8 byte size of the serialized prompt.
+/** 序列化后 prompt 的 UTF-8 字节数。
  *
  * @param {string} text
  * @returns {number}
@@ -74,8 +78,8 @@ export function promptByteLength(text) {
 }
 
 /**
- * Fail loudly when the prompt is larger than the CLI can consume.
- * The CLI truncates at 8388608 bytes, this provider refuses at 7340032 bytes.
+ * prompt 超过 CLI 可消费的大小时明确失败。
+ * CLI 在 8388608 字节处截断，本 provider 在 7340032 字节就拒绝。
  *
  * @param {string} text
  * @param {number} [limit]

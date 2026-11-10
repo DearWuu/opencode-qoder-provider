@@ -1,11 +1,17 @@
+/**
+ * 文件职责：经 CLI 发现模型目录（`--list-models`）与读取 CLI 版本（`--version`）。
+ * 上游：index.ts 的 discover/cliVersion、scripts/check-real-catalog.mjs。
+ * 下游：src/cli.runCli、src/models.parseModelList。
+ */
 import { MAX_STDOUT_BYTES, runCli } from "./cli.mjs"
 import { parseModelList } from "./models.mjs"
 
 /**
- * Discover the models of the currently logged in Qoder account.
+ * 发现当前已登录 Qoder 账号的模型。
  *
- * `qoderclicn --list-models` prints a `MODEL` header followed by one line per
- * model and exits with code 1 when the CLI is not authenticated.
+ * `qoderclicn --list-models` 先打印 `MODEL` 表头，再每行一个模型；未认证时退出码为 1。
+ *
+ * 调用方：index.ts 的 discover、scripts/check-real-catalog.mjs。
  *
  * @param {{ cliPath?: string, cwd?: string, timeoutMs?: number }} [options]
  * @returns {Promise<Array<{ name: string, modelID: string }>>}
@@ -36,7 +42,7 @@ export async function fetchModelList({ cliPath, cwd, timeoutMs } = {}) {
 }
 
 /**
- * Read the CLI version (`qoderclicn --version`).
+ * 读取 CLI 版本（`qoderclicn --version`）。
  *
  * @param {{ cliPath?: string, timeoutMs?: number }} [options]
  * @returns {Promise<string|undefined>}

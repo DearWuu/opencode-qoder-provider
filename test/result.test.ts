@@ -99,8 +99,8 @@ test("buildUsage without tokens and without a ratio stays at zero", () => {
 })
 
 test("summarizeModelUsage picks the entry with credits or tokens over the first all-zero key", () => {
-  // Real-world shape: Auto accounting emits an all-zero `auto` entry first,
-  // the actual usage sits under `fast` with credits.
+  // 真实形态：Auto 记账会先输出一条全 0 的 `auto` 条目，
+  // 真实用量在带 credits 的 `fast` 条目上。
   const raw = {
     total_credits: 0.129,
     usage: { input_tokens: 0, output_tokens: 0 },

@@ -1,16 +1,19 @@
+/**
+ * 文件职责：把本地调用日志聚合成侧边栏面板的稳定数据集（total/today/last）。
+ * 上游：index.ts 的 stats RPC。
+ * 下游：src/logger.sumCredits。
+ */
 import { sumCredits } from "./logger.mjs"
 
 /**
- * Aggregate the local call log into the stable data set of the sidebar panel.
+ * 把本地调用日志聚合成侧边栏面板的稳定数据集。
  *
- * Pure function: the caller passes the entries read from the JSONL log and an
- * injectable clock, so no model call and no network access is involved.
- * "Today" is the local calendar day of `now`.
+ * 纯函数：调用方传入从 JSONL 日志读出的条目与可注入时钟，因此不涉及模型调用或网络访问。
+ * "今天"指 `now` 所在的本机日历日。
  *
- * Every field is always present and never null: an absent value shows up as
- * `""` or `0`, which keeps the RPC output schema simple to validate.
+ * 每个字段恒存在且非 null：缺失值表现为 `""` 或 `0`，让 RPC 输出 schema 保持简单可校验。
  *
- * @param {Array<Record<string, any>>} entries call log entries, oldest first
+ * @param {Array<Record<string, any>>} entries 调用日志条目，按时间从旧到新
  * @param {{ provider: string, models: number, authenticated: boolean, permissionMode: string, cliVersion?: string, now?: Date }} info
  * @returns {{ provider: string, models: number, authenticated: boolean, permissionMode: string, cliVersion: string, totalCalls: number, totalCredits: number, todayCalls: number, todayCredits: number, lastModel: string, lastCredits: number, lastAt: string, lastError: boolean }}
  */
@@ -46,7 +49,7 @@ export function computeQoderStats(entries, info) {
 }
 
 /**
- * Local calendar day as `YYYY-MM-DD`; null for an invalid date.
+ * 本地日历日，格式 `YYYY-MM-DD`；非法日期返回 null。
  *
  * @param {Date} date
  * @returns {string|null}

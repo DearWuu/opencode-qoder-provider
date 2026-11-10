@@ -1,7 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 
-import { STATS_POLL_INTERVAL_MS, createStatsPoller } from "../src/credits.mjs"
+import { STATS_POLL_INTERVAL_MS, createStatsPoller } from "../src/poller.mjs"
 
 interface FakeTimers {
   scheduled: Array<{ id: number; fn: () => void; ms: number }>
@@ -41,7 +41,7 @@ function createFakeTimers(): FakeTimers {
   }
 }
 
-/** let awaited microtasks (the fetch resolution) run */
+/** 让已 await 的微任务（fetch 的 resolve）跑完 */
 async function flush(): Promise<void> {
   for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setImmediate(resolve))
 }

@@ -56,7 +56,7 @@ test("buildCliArgs keeps the variadic --tools flag last", () => {
   const disabled = buildCliArgs({ cliTools: "" })
   assert.deepEqual(disabled.slice(disabled.indexOf("--tools")), ["--tools", ""])
 
-  // An empty array disables every built-in tool, exactly like "".
+  // 空数组与 "" 一样，禁用全部内置工具。
   assert.deepEqual(buildCliArgs({ cliTools: [] }).slice(-2), ["--tools", ""])
   assert.equal(buildCliArgs({ cliTools: undefined }).includes("--tools"), false)
   assert.equal(buildCliArgs({ additionalDirs: [] }).includes("--add-dir"), false)
@@ -69,7 +69,7 @@ test("buildCliArgs forwards maxOutputTokens only for positive integers", () => {
   ])
   assert.deepEqual(buildCliArgs({ modelID: "Auto", maxOutputTokens: 1 }).slice(-2), ["--max-output-tokens", "1"])
 
-  // Invalid values are ignored: no flag, no broken CLI invocation.
+  // 非法值被忽略：不传 flag，也不会让 CLI 调用失败。
   for (const invalid of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "4096", null]) {
     assert.equal(buildCliArgs({ modelID: "Auto", maxOutputTokens: invalid as never }).includes("--max-output-tokens"), false)
   }
@@ -212,7 +212,7 @@ test("killTree falls back to child.kill when spawning taskkill throws", () => {
 
 test("buildCliArgs in stream mode switches to stream-json with partial messages", () => {
   const args = buildCliArgs({ modelID: "Auto", cwd: "/tmp/work", permissionMode: "default", stream: true })
-  assert.deepEqual(args.slice(0, 5), ["-p", "-o", "stream-json", "--include-partial-messages", "--permission-mode"])
+  assert.deepEqual(args.slice(0, 6), ["-p", "-o", "stream-json", "--include-partial-messages", "--permission-mode", "default"])
   assert.equal(args.includes("json"), false)
 })
 
@@ -252,7 +252,7 @@ test("runCli with collectStdout:false skips the raw capture but keeps onStdout",
   })
   assert.equal(run.code, 0)
   assert.ok(chunks.length >= 1)
-  // The stream consumer saw every byte; the raw copy was never decoded.
+  // 流消费者拿到了全部字节；原始副本从未被解码。
   assert.match(Buffer.concat(chunks).toString("utf8"), /MODEL\nAuto\nFast/)
   assert.equal(run.stdout, "")
   assert.equal(run.stdoutTruncated, false)

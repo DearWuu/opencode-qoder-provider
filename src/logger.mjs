@@ -1,14 +1,20 @@
+/**
+ * 文件职责：JSONL 调用日志的写入与读取（不含 prompt、回答或凭证）。
+ * 上游：src/provider 记录每次调用、src/command 读最近调用、index.ts 的 stats 聚合。
+ * 下游：node:fs、node:path。
+ */
 import { appendFileSync, chmodSync, mkdirSync, readFileSync } from "node:fs"
 import { dirname } from "node:path"
 
 /**
- * Append one call record to the JSONL log.
+ * 向 JSONL 日志追加一条调用记录。
  *
- * The log never contains the prompt, the prompt answer or any credential:
- * only the model, the credit consumption and the outcome.
+ * 日志永不包含 prompt、回答或任何凭证：只记模型、Credits 消耗与结果。
  *
- * The log directory is private (0700) and the log file itself is never
- * group/world readable (0600), including files created by older versions.
+ * 日志目录为私有（0700），日志文件从不对其他用户可读（0600），
+ * 旧版本创建的文件也会被收紧。
+ *
+ * 调用方：src/provider 的 logCall。
  *
  * @param {string} file
  * @param {Record<string, any>} entry
@@ -22,15 +28,15 @@ export function appendCallLog(file, entry) {
     try {
       chmodSync(file, 0o600)
     } catch {
-      // Best effort: a foreign file owner may refuse the chmod.
+      // 尽力而为：文件属主不是当前用户时 chmod 可能失败。
     }
   } catch {
-    // Logging must never break a model call.
+    // 日志写失败绝不能打断模型调用。
   }
 }
 
 /**
- * Build the JSONL record for a single Qoder call.
+ * 为单次 Qoder 调用构建 JSONL 记录。
  *
  * @param {object} entry
  * @param {string} entry.requestedModel
@@ -45,9 +51,20 @@ export function appendCallLog(file, entry) {
  * @param {boolean} [entry.timedOut]
  * @param {boolean} [entry.aborted]
  * @param {boolean} [entry.modelFallback]
+ * @param {"idle"|"total"} [entry.timeoutKind]
+ * @param {string} [entry.lastEventType]
+ * @param {number} [entry.lastEventAgoMs]
+ * @param {boolean} [entry.sawStdout]
+ * @param {boolean} [entry.sawStderr]
+ * @param {boolean} [entry.sawTextDelta]
+ * @param {boolean} [entry.sawResult]
  * @returns {Record<string, any>}
  */
-export function buildLogEntry({ requestedModel, actualModel, usageModelKey, usageModelKeys, credits, durationMs, isError, exitCode, sessionId, timedOut, aborted, modelFallback }) {
+export function buildLogEntry({
+  requestedModel, actualModel, usageModelKey, usageModelKeys, credits, durationMs, isError, exitCode,
+  sessionId, timedOut, aborted, modelFallback, timeoutKind, lastEventType, lastEventAgoMs,
+  sawStdout, sawStderr, sawTextDelta, sawResult,
+}) {
   const entry = {
     ts: new Date().toISOString(),
     provider: "qoder",
@@ -63,6 +80,13 @@ export function buildLogEntry({ requestedModel, actualModel, usageModelKey, usag
     sessionId,
     timedOut,
     aborted,
+    timeoutKind,
+    lastEventType,
+    lastEventAgoMs,
+    sawStdout,
+    sawStderr,
+    sawTextDelta,
+    sawResult,
   }
   for (const key of Object.keys(entry)) {
     if (entry[key] === undefined) delete entry[key]
@@ -71,8 +95,10 @@ export function buildLogEntry({ requestedModel, actualModel, usageModelKey, usag
 }
 
 /**
- * Read the last entries of the JSONL call log.
- * Used by `/qoder status` to show the most recent call without a model round trip.
+ * 读取 JSONL 调用日志的最后若干条。
+ * `/qoder status` 用它显示最近一次调用，无需模型往返。
+ *
+ * 调用方：index.ts 的 stats RPC、src/command 的 buildStatusText。
  *
  * @param {string} file
  * @param {number} [limit]
@@ -93,14 +119,16 @@ export function readCallLog(file, limit = 5) {
     try {
       entries.push(JSON.parse(trimmed))
     } catch {
-      // Ignore corrupted lines instead of failing the status command.
+      // 跳过损坏的行，而不是让 status 命令失败。
     }
   }
   return entries.slice(-limit)
 }
 
 /**
- * Sum the credits of all logged calls.
+ * 累加所有已记录调用的 Credits。
+ *
+ * 调用方：src/command 的 buildStatusText、src/stats 的 computeQoderStats。
  *
  * @param {Array<Record<string, any>>} entries
  * @returns {number}

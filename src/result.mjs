@@ -1,11 +1,15 @@
 /**
- * Extract credit usage and the CLI's accounting keys.
- * `modelUsage` keys are not evidence of the model that served the request.
+ * 文件职责：CLI 原始结果 → AI SDK V3 结果（content/finishReason/usage/providerMetadata），含 Credits 提取与模型回落判定。
+ * 上游：src/provider 的 execute/buildGenerateResult。
+ * 下游：无。
+ */
+
+/**
+ * 提取 Credits 用量与 CLI 的计费 key。
+ * `modelUsage` 的 key 不能作为"哪个模型实际服务了请求"的证据。
  *
- * The primary entry is the first `modelUsage` entry that actually accounted
- * for something (credits > 0 or any non-zero token counter). The CLI can
- * emit an all-zero `auto` entry next to the real `fast` entry; key order
- * alone would then report zero usage.
+ * 主条目是第一个真正记账的 `modelUsage` 条目（credits > 0 或任一 token 计数非零）。
+ * CLI 可能在全 0 的 `auto` 条目旁输出真实的 `fast` 条目；只看 key 顺序会报成零用量。
  */
 export function summarizeModelUsage(raw) {
   const modelUsage = raw?.modelUsage && typeof raw.modelUsage === "object" ? raw.modelUsage : {}
@@ -35,11 +39,11 @@ export function summarizeModelUsage(raw) {
 }
 
 /**
- * Read `usage.context_usage_ratio` (fallback: top level). The CLI 1.1.85 sets
- * every token counter to 0 but keeps this ratio truthful.
+ * 读取 `usage.context_usage_ratio`（回退到顶层）。CLI 1.1.85 把每个 token 计数都置 0，
+ * 但这个比例仍然真实。
  *
  * @param {any} raw
- * @returns {number|undefined} a ratio in (0, 1], undefined when absent or invalid
+ * @returns {number|undefined} (0, 1] 区间的比例；缺失或非法时为 undefined
  */
 export function readContextUsageRatio(raw) {
   for (const value of [raw?.usage?.context_usage_ratio, raw?.context_usage_ratio]) {
@@ -48,19 +52,18 @@ export function readContextUsageRatio(raw) {
   return undefined
 }
 
-/** `stop_reason` values that mean the output hit its token length limit. */
+/** 表示输出触及 token 长度上限的 `stop_reason` 取值。 */
 const LENGTH_STOP_REASONS = new Set(["max_tokens", "max-output-tokens"])
 
-/** Map the CLI `stop_reason` onto the unified finish reason. */
+/** 把 CLI 的 `stop_reason` 映射为统一的 finish reason。 */
 export function toUnifiedFinishReason(raw) {
   if (raw?.is_error === true) return "error"
   return LENGTH_STOP_REASONS.has(raw?.stop_reason) ? "length" : "stop"
 }
 
 /**
- * Pick the `modelUsage` key that carries the real accounting: credits > 0 or
- * any non-zero token counter. Falls back to the first key when no entry
- * qualifies (all-zero accounting still reports the CLI's own ordering).
+ * 选出真正承载记账信息的 `modelUsage` key：credits > 0 或任一 token 计数非零。
+ * 没有条目符合时退回第一个 key（全 0 记账仍按 CLI 自己的顺序报告）。
  */
 function pickUsageModelKey(modelUsage) {
   const keys = Object.keys(modelUsage)
@@ -85,7 +88,7 @@ const FALLBACK_PATTERNS = [
   /\bModel\s+(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z0-9][A-Za-z0-9._-]*))[^\r\n]*?\busing\s+(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z0-9][A-Za-z0-9._-]*))\s+instead\b/i,
 ]
 
-/** Detect only an explicit model fallback message written by the CLI to stderr. */
+/** 只识别 CLI 明确写入 stderr 的模型回落提示。 */
 export function detectFallback(requestedModel, stderr) {
   const text = typeof stderr === "string" ? stderr : ""
   for (const line of text.split(/\r?\n/)) {
@@ -107,9 +110,9 @@ export class ModelFallbackError extends Error {
 }
 
 /**
- * Resolve the input-token total shown to the UI.
- * Real non-zero counters win; a missing/zero counter plus a valid
- * `context_usage_ratio` yields an approximation of `ratio * contextLimit`.
+ * 解析展示给 UI 的输入 token 总数。
+ * 真实的非零计数优先；计数缺失或为 0 且 `context_usage_ratio` 有效时，
+ * 用 `ratio * contextLimit` 近似。
  *
  * @param {{ inputTokens?: number, contextUsageRatio?: number }} summary
  * @param {number} contextLimit
@@ -124,7 +127,7 @@ export function resolveInputTokens(summary, contextLimit) {
   return { total: real, approximated: false }
 }
 
-/** Build the AI SDK V3 usage block (nested input/output token counters). */
+/** 构建 AI SDK V3 的 usage 块（嵌套的输入/输出 token 计数）。 */
 export function buildUsage(raw, { contextLimit } = {}) {
   const summary = summarizeModelUsage(raw)
   const usage = raw?.usage && typeof raw.usage === "object" ? raw.usage : {}
@@ -148,7 +151,7 @@ export function buildUsage(raw, { contextLimit } = {}) {
   }
 }
 
-/** Build `providerMetadata.qoder` from the CLI result. */
+/** 由 CLI 结果构建 `providerMetadata.qoder`。 */
 /**
  * @param {{ raw: any, requestedModel: string, fallback?: { actualModel?: string, fellBack?: boolean }, contextLimit?: number }} params
  */
@@ -179,8 +182,8 @@ export function buildProviderMetadata({ raw, requestedModel, fallback = undefine
 }
 
 /**
- * Convert a raw CLI result into an AI SDK V3 generate result.
- * Explicit fallbacks are rejected by `execute` before reaching this conversion.
+ * 把 CLI 原始结果转换成 AI SDK V3 generate 结果。
+ * 明确的模型回落会在到达这里之前被 `execute` 拒绝。
  */
 export function buildGenerateResult({ raw, requestedModel, contextLimit }) {
   const isError = raw?.is_error === true

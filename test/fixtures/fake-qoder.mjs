@@ -11,7 +11,7 @@
  *  - FAKE_QODER_RECORD        path of the file that receives {argv, stdin, stdinBytes}
  *  - FAKE_QODER_PID_FILE      path of the file that receives the process pid
  *  - FAKE_QODER_MODE          ok | error | usage-auto | fallback | fallback-quoted |
- *                             hang | slow | partial | partial-no-result | partial-empty |
+ *                             hang | heartbeat | slow | partial | partial-no-result | partial-empty |
  *                             huge-out | huge-err | not-json | crash
  *  - FAKE_QODER_MODELS        newline separated model list for --list-models
  *  - FAKE_QODER_DISCOVERY_DELAY_MS  ms to wait before answering --list-models
@@ -29,6 +29,7 @@
  *                                   plus the real usage under `fast` with credits
  *  - FAKE_QODER_EMPTY_STOP          "0": the empty text block gets no content_block_stop
  */
+import { spawn } from "node:child_process"
 import { writeFileSync } from "node:fs"
 
 const argv = process.argv.slice(2)
@@ -59,6 +60,13 @@ async function fill(stream, bytes, char = "x") {
     if (stream.write(slice)) continue
     await new Promise((resolve) => stream.once("drain", resolve))
   }
+}
+
+function spawnTrackedChild() {
+  const file = process.env.FAKE_QODER_CHILD_PID_FILE
+  if (!file) return
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" })
+  writeFileSync(file, String(child.pid))
 }
 
 function positiveNumberEnv(name) {
@@ -202,7 +210,14 @@ if (argv.includes("--list-models")) {
     record({ argv, stdin, stdinBytes: Buffer.byteLength(stdin, "utf8") })
 
     if (mode === "hang") {
+      spawnTrackedChild()
       setInterval(() => {}, 1000)
+      return
+    }
+    if (mode === "heartbeat") {
+      spawnTrackedChild()
+      setInterval(() => process.stdout.write("."), 40)
+      setInterval(() => process.stderr.write("."), 55)
       return
     }
     if (mode === "slow") {

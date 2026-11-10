@@ -30,7 +30,8 @@
     "check:catalog": "node scripts/check-real-catalog.mjs"
   },
   "dependencies": {
-    "@qodercn-ai/qoderclicn": "1.1.85"
+    "@qodercn-ai/qoderclicn": "1.1.85",
+    "node-pty": "^1.1.0"
   },
   "devDependencies": {
     "@opencode/plugin": "2.2.5",

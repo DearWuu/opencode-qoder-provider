@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { appendFileSync, mkdtempSync } from "node:fs"
+import { appendFileSync, mkdtempSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url"
 import { QoderProviderPlugin } from "../index.ts"
 
 const FAKE_CLI = fileURLToPath(new URL("./fixtures/fake-qoder.mjs", import.meta.url))
+const OFFICIAL_USAGE = readFileSync(fileURLToPath(new URL("./fixtures/official-usage.txt", import.meta.url)), "utf8")
 
 interface Harness {
   ctx: any
@@ -18,6 +19,7 @@ interface Harness {
   rpcDefinitions: any[]
   rpcHandlers: any[]
   rpcDisposed: { disposed: number }
+  quotaReads: any[]
 }
 
 function createHarness(): Harness {
@@ -29,9 +31,19 @@ function createHarness(): Harness {
   const rpcDefinitions: any[] = []
   const rpcHandlers: any[] = []
   const rpcState = { disposed: 0 }
+  const quotaReads: any[] = []
 
   const ctx = {
-    options: { cliPath: FAKE_CLI, cwd: dir, timeoutMs: 20_000, logFile: join(dir, "calls.jsonl") },
+    options: {
+      cliPath: FAKE_CLI,
+      cwd: dir,
+      timeoutMs: 20_000,
+      logFile: join(dir, "calls.jsonl"),
+      readUsage: async (input: any) => {
+        quotaReads.push(input)
+        return OFFICIAL_USAGE
+      },
+    },
     location: { directory: dir },
     provider: {
       transform: async (callback: (editor: any) => void) => {
@@ -81,7 +93,7 @@ function createHarness(): Harness {
     },
   }
 
-  return { ctx, providerAdds, commands, sdkHooks, synthetic, rpcDefinitions, rpcHandlers, rpcDisposed: rpcState }
+  return { ctx, providerAdds, commands, sdkHooks, synthetic, rpcDefinitions, rpcHandlers, rpcDisposed: rpcState, quotaReads }
 }
 
 test("the plugin registers the qoder provider with the aisdk package", async () => {
@@ -196,7 +208,7 @@ test("the plugin registers the qoder RPC contract", async () => {
 
   assert.equal(harness.rpcDefinitions.length, 1)
   assert.equal(harness.rpcDefinitions[0].id, "qoder")
-  assert.deepEqual(Object.keys(harness.rpcDefinitions[0].methods), ["execute", "stats"])
+  assert.deepEqual(Object.keys(harness.rpcDefinitions[0].methods), ["execute", "stats", "quota"])
 })
 
 test("the RPC and the server command answer with the same text", async () => {
@@ -219,6 +231,27 @@ test("the RPC builds the status text without touching the session", async () => 
   assert.match(result.text as string, /Qoder provider status/)
   assert.match(result.text as string, /Auth: ok/)
   assert.equal(harness.synthetic.length, 0)
+})
+
+test("the quota RPC returns official values and serves the second read from cache", async () => {
+  const harness = createHarness()
+  await QoderProviderPlugin.setup(harness.ctx as never)
+
+  const first = await harness.rpcHandlers[0].quota({ refresh: false }, {} as never)
+  assert.equal(first.available, true)
+  assert.equal(first.used, 6872)
+  assert.equal(first.total, 10000)
+  assert.equal(first.remaining, 3128)
+  assert.equal(first.percentage, 69)
+  assert.equal(first.cached, false)
+  const second = await harness.rpcHandlers[0].quota({}, {} as never)
+  assert.equal(second.cached, true)
+  assert.equal(harness.quotaReads.length, 1)
+
+  const status = await harness.rpcHandlers[0].execute({ text: "status" }, {} as never)
+  assert.match(status.text, /Quota: 6,872 \/ 10,000 used \(69%\)/)
+  assert.match(status.text, /Quota source: Qoder CLI \/usage/)
+  assert.equal(harness.quotaReads.length, 2)
 })
 
 test("the plugin disposes the RPC registration when it is unloaded", async () => {
@@ -256,10 +289,11 @@ test("the stats RPC aggregates the call log without running a model", async () =
   assert.equal(stats.lastError, false)
   assert.equal(stats.authenticated, true)
   assert.equal(stats.models, 3)
-  assert.equal(stats.permissionMode, "default")
+  assert.equal(stats.permissionMode, "bypass_permissions")
   assert.equal(typeof stats.cliVersion, "string")
-  // The stats call never touches the session or the model pipeline.
+  // stats 调用不碰会话、模型链路或官方配额 PTY。
   assert.equal(harness.synthetic.length, 0)
+  assert.equal(harness.quotaReads.length, 0)
 })
 
 test("the stats RPC returns zeros when the call log is missing", async () => {

@@ -5,7 +5,7 @@ import { computeQoderStats } from "../src/stats.mjs"
 
 const INFO = { provider: "qoder", models: 12, authenticated: true, permissionMode: "default", cliVersion: "1.1.85" }
 
-/** noon of a fixed local day so "today" works in every timezone. */
+/** 固定本机日历日的正午，让 "today" 在任何时区都成立。 */
 function dayAt(now: Date, offsetDays: number, hour = 12): string {
   return new Date(now.getFullYear(), now.getMonth(), now.getDate() + offsetDays, hour).toISOString()
 }
@@ -43,8 +43,8 @@ test("entries without usable credits still count as calls", () => {
   const stats = computeQoderStats(entries, { ...INFO, now: NOW })
   assert.equal(stats.totalCalls, 3)
   assert.equal(stats.totalCredits, 3)
-  // The malformed timestamp is neither today nor usable as lastAt input, but
-  // the last entry still defines the "last" fields.
+  // 非法时间戳既不算今天，也不能作为 lastAt 的输入，
+  // 但最后一条仍决定 "last" 系列字段。
   assert.equal(stats.todayCalls, 2)
   assert.equal(stats.todayCredits, 0)
   assert.equal(stats.lastModel, "auto")
