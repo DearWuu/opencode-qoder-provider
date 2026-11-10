@@ -1,6 +1,6 @@
 {
   "name": "opencode-qoder-provider",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenCode provider plugin that routes model calls to the Qoder CLI (provider: Qoder (Credits)).",
   "license": "MIT",
   "repository": {
@@ -16,6 +16,7 @@
   "files": [
     "index.ts",
     "tui.ts",
+    "panel.tsx",
     "rpc.ts",
     "provider.mjs",
     "src",
@@ -24,7 +25,7 @@
   ],
   "scripts": {
     "test": "bun test",
-    "test:node": "node --test \"test/**/*.test.ts\"",
+    "test:node": "node --import tsx --test \"test/**/*.test.ts\"",
     "check": "tsc --noEmit",
     "check:catalog": "node scripts/check-real-catalog.mjs"
   },
@@ -34,15 +35,21 @@
   "devDependencies": {
     "@opencode/plugin": "2.2.5",
     "@opencode/schema": "2.2.5",
+    "@opentui/solid": "^0.8.2",
     "@types/node": "^24.0.0",
     "solid-js": "^1.9.17",
+    "tsx": "^4.23.0",
     "typescript": "^5.9.0"
   },
   "peerDependencies": {
-    "@opencode/plugin": ">=2.2.5"
+    "@opencode/plugin": ">=2.2.5",
+    "@opentui/solid": ">=0.8.0"
   },
   "peerDependenciesMeta": {
     "@opencode/plugin": {
+      "optional": true
+    },
+    "@opentui/solid": {
       "optional": true
     }
   }

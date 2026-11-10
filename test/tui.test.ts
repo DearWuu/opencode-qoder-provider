@@ -11,6 +11,7 @@ interface Harness {
   rpcCalls: any[]
   modelInvalidated: any[]
   modelSynced: any[]
+  slotClaims: any[]
 }
 
 function createHarness(): Harness {
@@ -20,6 +21,7 @@ function createHarness(): Harness {
   const rpcCalls: any[] = []
   const modelInvalidated: any[] = []
   const modelSynced: any[] = []
+  const slotClaims: any[] = []
 
   const context = {
     location: { directory: "/tmp/project" },
@@ -43,6 +45,12 @@ function createHarness(): Harness {
           toasts.push(options)
         },
       },
+      slot: (claim: any) => {
+        slotClaims.push(claim)
+        return () => {
+          claim.disposed = true
+        }
+      },
     },
     keymap: {
       layer: (factory: any) => {
@@ -64,7 +72,7 @@ function createHarness(): Harness {
     },
   }
 
-  return { context, layers, alerts, toasts, rpcCalls, modelInvalidated, modelSynced }
+  return { context, layers, alerts, toasts, rpcCalls, modelInvalidated, modelSynced, slotClaims }
 }
 
 async function setup(): Promise<Harness> {
@@ -151,4 +159,13 @@ test("the model list falls back to the default location", async () => {
   await cmd.run("refresh")
 
   assert.deepEqual(harness.modelInvalidated[0], { directory: "/tmp/default" })
+})
+
+test("the setup appends the credits panel to the sidebar slot", async () => {
+  const harness = await setup()
+
+  assert.equal(harness.slotClaims.length, 1)
+  const claim = harness.slotClaims[0]
+  assert.equal(claim.append, "sidebar.content")
+  assert.equal(typeof claim.render, "function")
 })

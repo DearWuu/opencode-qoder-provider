@@ -122,6 +122,25 @@ curl -u "opencode:<口令>" -X POST \
 
 返回 `{"output":{"text":"Qoder provider status ..."}}`。`text` 与 `/qoder` 命令的入参同义：`status`（默认）、`refresh`、`models`、`login`。
 
+`stats` 方法无入参，返回侧边栏面板用的稳定字段：`provider`、`models`、`authenticated`、`permissionMode`、`cliVersion`、`totalCalls`、`totalCredits`、`todayCalls`、`todayCredits`、`lastModel`、`lastCredits`、`lastAt`、`lastError`。服务端只读 `calls.jsonl` 与模型目录，不调用模型、不联网。所有字段恒存在、恒非 null：未知字符串为 `""`、未知数值为 `0`（`lastAt === ""` 即"还没有调用"）。
+
+## TUI 侧边栏 Credits 面板
+
+TUI 插件在侧边栏（`sidebar.content` slot）常驻一个紧凑的 **Qoder Credits** 面板，约 5 行：
+
+```
+Qoder Credits                       ← 点击打开 /qoder status 对话框
+Spent 12.5 · 56 calls               ← 本地累计消耗与调用次数
+Today 1.23 · 4 calls                ← 今天（本地日历日）的消耗与次数
+Last Qwen3.8-Flash 0.42 · 3m ago    ← 最近一次调用；失败时此行变警告色
+12 models · auth ok                 ← 模型数与认证状态
+```
+
+- **数据来源**：`stats` RPC，即本地 `calls.jsonl` 调用日志的聚合，每 15 秒轮询一次，面板创建时立即拉取，插件卸载时停止轮询。RPC 失败时面板收成一行 muted 错误（`stats unavailable: …`），不影响 TUI 其余部分。
+- **这是本地累计消耗，不是账户余额**。日志只记录本插件观测到的调用；在别处（其他工具、网页端）消耗的 Credits 不在其中，插件也不会去查账户余额。
+- 还没有任何调用时显示 `Spent 0 · 0 calls` 与 `Last no calls yet`。
+- 点击标题等价于执行 `/qoder status`，走同一个对话框实现。
+
 ## 配置项
 
 插件选项来自 OpenCode 配置里 `plugins[].options` 对象，也可以用环境变量覆盖：
@@ -191,8 +210,9 @@ curl -u "opencode:<口令>" -X POST \
 | 文件 | 作用 |
 | --- | --- |
 | `index.ts` | OpenCode 服务端插件。`Plugin.define` + `ctx.provider.transform` 注册 provider 与模型，`ctx.command.transform` 注册 `/qoder`，`ctx.aisdk.hook("sdk")` 把 provider runtime 交给 OpenCode，`ctx.rpc.register` 注册 `qoder` RPC |
-| `tui.ts` | OpenCode TUI 插件。注册 `/qoder` slash 命令，调用 `qoder` RPC 拿结果，用原生 dialog 显示 |
-| `rpc.ts` | RPC 契约：`qoder` id、`execute` 方法（`{text}` → `{text}`），server 与 TUI 共用 |
+| `tui.ts` | OpenCode TUI 插件。注册 `/qoder` slash 命令，调用 `qoder` RPC 拿结果，用原生 dialog 显示；并在 `sidebar.content` slot 挂载 Credits 面板 |
+| `panel.tsx` | 侧边栏 Qoder Credits 面板（@opentui/solid 组件），15 秒轮询 `stats` RPC，点击标题打开 status 对话框 |
+| `rpc.ts` | RPC 契约：`qoder` id、`execute`（`{text}` → `{text}`）与 `stats`（`{}` → 面板数据）两个方法，server 与 TUI 共用 |
 | `provider.mjs` | provider runtime。导出 `createQoder(options)`，返回带 `languageModel(modelID)` 的 provider（AI SDK **LanguageModelV3**） |
 | `src/options.mjs` | 选项与默认值解析（CLI 路径、权限模式、超时、日志位置） |
 | `src/models.mjs` | Qoder 模型名 ↔ OpenCode 模型 ID 映射、目录解析 |
@@ -202,6 +222,8 @@ curl -u "opencode:<口令>" -X POST \
 | `src/logger.mjs` | JSONL 调用日志（无 prompt、无凭证） |
 | `src/catalog.mjs` | `--list-models` / `--version` 调用 |
 | `src/command.mjs` | `/qoder` 的子命令解析与状态/目录/登录文案（server 与 TUI 共用同一份） |
+| `src/stats.mjs` | 调用日志 → 面板数据聚合（total/today/last，纯函数、时钟可注入） |
+| `src/credits.mjs` | 面板行的纯格式化（Credits 数值、相对时间、错误行）与 15 秒轮询器（timer 可注入） |
 
 OpenCode 通过 `aisdk:file://<绝对路径>/provider.mjs` 解析 provider；该模块导出 `createQoder(options)`，OpenCode 随后调用 `sdk.languageModel(modelID)`。
 
@@ -209,7 +231,7 @@ OpenCode 通过 `aisdk:file://<绝对路径>/provider.mjs` 解析 provider；该
 
 ```bash
 npm ci
-npm run test:node # Node 24 原生运行 TypeScript 测试
+npm run test:node # Node 24 经 tsx 加载器运行 TypeScript 测试（含 .tsx 面板模块）
 npm run check     # tsc --noEmit
 ```
 
@@ -217,7 +239,7 @@ npm run check     # tsc --noEmit
 
 测试用 `test/fixtures/fake-qoder.mjs` 假 CLI，**不消耗 Credits、不联网、不需要登录**。覆盖：模型 ID 与冲突、prompt 多角色序列化与媒体报错、stdin 纯文本（断言参数里没有 `--input-format`）、doGenerate/doStream 的 V3 事件、`is_error`、明确回落拒绝与误报防护、Credits metadata 与日志脱敏、abort 与超时。
 
-另外覆盖 TUI 与 RPC：RPC 契约的形状、`/qoder` slash 注册、RPC 调用成功走 dialog、失败走 error toast、`refresh` 之后刷新模型列表、server command 与 RPC 返回同一段文本、插件卸载时注销 RPC 注册。
+另外覆盖 TUI 与 RPC：RPC 契约两个方法的形状、`/qoder` slash 注册、侧边栏 slot 注册（`append: "sidebar.content"`）、RPC 调用成功走 dialog、失败走 error toast、`refresh` 之后刷新模型列表、server command 与 RPC 返回同一段文本、插件卸载时注销 RPC 注册；面板侧覆盖 stats 聚合（total/today/last/空日志）、行格式化与相对时间、15 秒轮询与停止清理（注入 fake timer）。
 
 ## 许可
 

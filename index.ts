@@ -5,9 +5,11 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 
 import { fetchCliVersion, fetchModelList } from "./src/catalog.mjs"
 import { buildLoginText, buildModelsText, buildStatusText, buildUsageText, parseSubcommand, preview } from "./src/command.mjs"
+import { readCallLog } from "./src/logger.mjs"
 import { buildModelCatalog } from "./src/models.mjs"
 import { PROVIDER_ID, PROVIDER_NAME, resolveOptions } from "./src/options.mjs"
 import { createQoder } from "./src/provider.mjs"
+import { computeQoderStats } from "./src/stats.mjs"
 import { QoderRpc } from "./rpc.ts"
 
 const PLUGIN_ID = "opencode-qoder-provider"
@@ -129,11 +131,23 @@ export const QoderProviderPlugin = Plugin.define({
       })
     })
 
-    // The TUI part calls this contract to show the answer in a dialog.
+    // The TUI part calls this contract to show the answer in a dialog and to
+    // feed the sidebar credits panel.
     const rpcRegistration = await ctx.rpc.register(QoderRpc, {
       execute: async (input) => {
         const { text } = input as { text: string }
         return { text: await executeQoderCommand(text) }
+      },
+      stats: async () => {
+        // Read-only aggregation of the local call log: no model, no network.
+        const entries = readCallLog(options.logFile, 100_000)
+        return computeQoderStats(entries, {
+          provider: PROVIDER_ID,
+          models: catalog.length,
+          authenticated: discoveryError === undefined,
+          permissionMode: options.permissionMode,
+          cliVersion: cliVersion ?? "",
+        })
       },
     })
 

@@ -1,6 +1,7 @@
 import { Plugin } from "@opencode/plugin/tui"
 import type { Context } from "@opencode/plugin/tui/context"
 
+import { QoderCreditsPanel } from "./panel.tsx"
 import { parseSubcommand } from "./src/command.mjs"
 import { QoderRpc } from "./rpc.ts"
 import type { QoderExecuteOutput } from "./rpc.ts"
@@ -10,10 +11,10 @@ const TUI_PLUGIN_ID = "opencode-qoder-provider.cli"
 /**
  * TUI part of the Qoder plugin.
  *
- * It registers the `/qoder` slash command in the prompt. The command calls the
- * server through the `qoder` RPC contract and shows the result in a native
- * dialog, so the answer is visible right away instead of waiting in the
- * session inbox.
+ * It registers the `/qoder` slash command in the prompt and the persistent
+ * credits panel in the sidebar. The command calls the server through the
+ * `qoder` RPC contract and shows the result in a native dialog, so the
+ * answer is visible right away instead of waiting in the session inbox.
  */
 export const QoderTuiPlugin = Plugin.define({
   id: TUI_PLUGIN_ID,
@@ -35,6 +36,15 @@ export const QoderTuiPlugin = Plugin.define({
         },
       ],
     }))
+
+    context.ui.slot({
+      append: "sidebar.content",
+      render: () =>
+        QoderCreditsPanel({
+          context,
+          onStatus: () => runQoderCommand(context, "status"),
+        }),
+    })
   },
 })
 

@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync } from "node:fs"
+import { appendFileSync, mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -196,7 +196,7 @@ test("the plugin registers the qoder RPC contract", async () => {
 
   assert.equal(harness.rpcDefinitions.length, 1)
   assert.equal(harness.rpcDefinitions[0].id, "qoder")
-  assert.deepEqual(Object.keys(harness.rpcDefinitions[0].methods), ["execute"])
+  assert.deepEqual(Object.keys(harness.rpcDefinitions[0].methods), ["execute", "stats"])
 })
 
 test("the RPC and the server command answer with the same text", async () => {
@@ -228,6 +228,51 @@ test("the plugin disposes the RPC registration when it is unloaded", async () =>
   assert.equal(harness.rpcDisposed.disposed, 0)
   await cleanup?.()
   assert.equal(harness.rpcDisposed.disposed, 1)
+})
+
+test("the stats RPC aggregates the call log without running a model", async () => {
+  const harness = createHarness()
+  await QoderProviderPlugin.setup(harness.ctx as never)
+
+  appendFileSync(
+    harness.ctx.options.logFile,
+    [
+      JSON.stringify({ ts: "2000-01-01T00:00:00.000Z", provider: "qoder", model: "old", credits: 7 }),
+      JSON.stringify({ ts: new Date().toISOString(), provider: "qoder", model: "auto", credits: 0.5 }),
+    ]
+      .map((line) => `${line}\n`)
+      .join(""),
+  )
+
+  const stats = await harness.rpcHandlers[0].stats({} as never, {} as never)
+
+  assert.equal(stats.provider, "qoder")
+  assert.equal(stats.totalCalls, 2)
+  assert.equal(stats.totalCredits, 7.5)
+  assert.equal(stats.todayCalls, 1)
+  assert.equal(stats.todayCredits, 0.5)
+  assert.equal(stats.lastModel, "auto")
+  assert.equal(stats.lastCredits, 0.5)
+  assert.equal(stats.lastError, false)
+  assert.equal(stats.authenticated, true)
+  assert.equal(stats.models, 3)
+  assert.equal(stats.permissionMode, "default")
+  assert.equal(typeof stats.cliVersion, "string")
+  // The stats call never touches the session or the model pipeline.
+  assert.equal(harness.synthetic.length, 0)
+})
+
+test("the stats RPC returns zeros when the call log is missing", async () => {
+  const harness = createHarness()
+  await QoderProviderPlugin.setup(harness.ctx as never)
+
+  const stats = await harness.rpcHandlers[0].stats({} as never, {} as never)
+
+  assert.equal(stats.totalCalls, 0)
+  assert.equal(stats.totalCredits, 0)
+  assert.equal(stats.todayCalls, 0)
+  assert.equal(stats.lastModel, "")
+  assert.equal(stats.lastAt, "")
 })
 
 test("an empty model catalog falls back to the placeholder catalog", async () => {
