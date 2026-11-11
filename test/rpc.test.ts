@@ -3,10 +3,10 @@ import assert from "node:assert/strict"
 
 import { QODER_RPC_ID, QoderRpc } from "../rpc.ts"
 
-test("the RPC contract is the qoder contract with execute, stats and quota methods", () => {
+test("the RPC contract is the qoder contract with execute, stats, quota and pricing methods", () => {
   assert.equal(QODER_RPC_ID, "qoder")
   assert.equal(QoderRpc.id, "qoder")
-  assert.deepEqual(Object.keys(QoderRpc.methods), ["execute", "stats", "quota"])
+  assert.deepEqual(Object.keys(QoderRpc.methods), ["execute", "stats", "quota", "pricing"])
 })
 
 test("the execute method takes a text and returns a text", () => {
@@ -85,6 +85,34 @@ test("the quota method exposes real values plus source, cache and error metadata
   assert.equal(method.output.properties.available.type, "boolean")
   assert.equal(method.output.properties.percentage.type, "integer")
   assert.equal(method.output.additionalProperties, false)
+})
+
+test("the pricing method returns the snapshot contract or null", () => {
+  const method = QoderRpc.methods.pricing as any
+  assert.deepEqual(method.input, {
+    type: "object",
+    properties: { refresh: { type: "boolean" } },
+    required: [],
+    additionalProperties: false,
+  })
+  assert.equal(method.output.anyOf.length, 2)
+  assert.deepEqual(method.output.anyOf[0], { type: "null" })
+  const snapshot = method.output.anyOf[1]
+  assert.deepEqual(snapshot.required, ["models", "fetchedAt", "source"])
+  const model = snapshot.properties.models.items
+  assert.deepEqual(model.required, ["modelKey", "priceFactor"])
+  assert.deepEqual(Object.keys(model.properties), ["modelKey", "qoderKey", "priceFactor", "originalPriceFactor", "promotion"])
+  assert.deepEqual(model.properties.promotion.required, ["active"])
+  assert.deepEqual(Object.keys(model.properties.promotion.properties), [
+    "active",
+    "discountFactor",
+    "beforePromotionPriceFactor",
+    "windowStart",
+    "windowEnd",
+    "timezone",
+    "badge",
+    "description",
+  ])
 })
 
 test("the RPC contract declares no events", () => {

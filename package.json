@@ -1,6 +1,6 @@
 {
   "name": "opencode-qoder-provider",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "OpenCode provider plugin that routes model calls to the Qoder CLI (provider: Qoder (Credits)).",
   "license": "MIT",
   "repository": {

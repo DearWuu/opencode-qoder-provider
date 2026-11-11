@@ -1,12 +1,14 @@
 /**
- * 文件职责：provider 选项与环境变量的规范化（CLI 路径、权限模式、超时、上下文窗口、日志路径、工具清单）及默认值。
+ * 文件职责：provider 选项与环境变量的规范化（CLI 路径、权限模式、超时、上下文窗口、日志路径、工具清单、倍率缓存与抓取超时）及默认值。
  * 上游：index.ts、provider.mjs、src/provider、src/catalog、scripts/check-real-catalog.mjs。
- * 下游：node:fs/os/path/url。
+ * 下游：node:fs/os/path/url、src/pricing（倍率 TTL 与抓取超时默认值）。
  */
 import { existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+
+import { PRICING_TIMEOUT_MS, PRICING_TTL_MS } from "./pricing.mjs"
 
 export const PROVIDER_ID = "qoder"
 export const PROVIDER_NAME = "Qoder (Credits)"
@@ -78,7 +80,7 @@ export function bundledCliPath(root = PACKAGE_ROOT) {
  *
  * @param {Record<string, any>} [raw]
  * @param {Record<string, string | undefined>} [env]
- * @returns {{ cliPath: string, permissionMode: string, timeoutMs: number, idleTimeoutMs: number, contextLimit: number, logFile: string, cwd: string|undefined, additionalDirs: string[], cliTools: string[]|""|undefined }}
+ * @returns {{ cliPath: string, permissionMode: string, timeoutMs: number, idleTimeoutMs: number, contextLimit: number, pricingTtlMs: number, pricingTimeoutMs: number, logFile: string, cwd: string|undefined, additionalDirs: string[], cliTools: string[]|""|undefined }}
  */
 export function resolveOptions(raw = {}, env = process.env) {
   const cliPath =
@@ -121,6 +123,22 @@ export function resolveOptions(raw = {}, env = process.env) {
     throw new Error(`Invalid contextLimit "${String(configuredContextLimit)}". Expected a positive number.`)
   }
 
+  const configuredPricingTtl = raw.pricingTtlMs ?? firstString(env.QODER_PRICING_TTL_MS) ?? PRICING_TTL_MS
+  const pricingTtlMs = typeof configuredPricingTtl === "string" && configuredPricingTtl.trim().length > 0
+    ? Number(configuredPricingTtl)
+    : configuredPricingTtl
+  if (typeof pricingTtlMs !== "number" || !Number.isFinite(pricingTtlMs) || pricingTtlMs <= 0) {
+    throw new Error(`Invalid pricingTtlMs "${String(configuredPricingTtl)}". Expected a positive number.`)
+  }
+
+  const configuredPricingTimeout = raw.pricingTimeoutMs ?? firstString(env.QODER_PRICING_TIMEOUT_MS) ?? PRICING_TIMEOUT_MS
+  const pricingTimeoutMs = typeof configuredPricingTimeout === "string" && configuredPricingTimeout.trim().length > 0
+    ? Number(configuredPricingTimeout)
+    : configuredPricingTimeout
+  if (typeof pricingTimeoutMs !== "number" || !Number.isFinite(pricingTimeoutMs) || pricingTimeoutMs <= 0) {
+    throw new Error(`Invalid pricingTimeoutMs "${String(configuredPricingTimeout)}". Expected a positive number.`)
+  }
+
   const logFile = firstString(raw.logFile) ?? firstString(env.QODER_LOG_FILE) ?? defaultLogFile(env)
 
   const additionalDirs = raw.additionalDirs ?? []
@@ -146,6 +164,8 @@ export function resolveOptions(raw = {}, env = process.env) {
     timeoutMs,
     idleTimeoutMs,
     contextLimit,
+    pricingTtlMs,
+    pricingTimeoutMs,
     logFile,
     cwd: firstString(raw.cwd),
     additionalDirs: Array.isArray(additionalDirs) ? additionalDirs.map((dir) => String(dir).trim()) : [],

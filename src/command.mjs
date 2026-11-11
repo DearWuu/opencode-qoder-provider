@@ -1,10 +1,11 @@
 /**
  * 文件职责：`/qoder` 子命令解析，以及 status/models/login/usage 文案的纯拼装。
  * 上游：index.ts 的 `/qoder` 命令与 RPC execute、tui.ts 的 parseSubcommand。
- * 下游：src/logger（读调用日志、累加 Credits）、src/options（provider 名称）。
+ * 下游：src/logger（读调用日志、累加 Credits）、src/options（provider 名称）、src/pricing（倍率与促销态文案）。
  */
 import { readCallLog, sumCredits } from "./logger.mjs"
 import { PROVIDER_ID, PROVIDER_NAME } from "./options.mjs"
+import { modelPricingLine, pricingStatusLine } from "./pricing.mjs"
 
 /**
  * 从一次 `/qoder ...` 调用里解析出子命令。
@@ -48,9 +49,11 @@ export function preview(catalog, limit = 6) {
  * @param {Array<{ id: string, modelID: string, name: string }>} catalog
  * @param {string|undefined} discoveryError
  * @param {string|undefined} cliVersion
+ * @param {Record<string, any>|null|undefined} [pricing] 每模型倍率快照；缺失时省略 Pricing 行
+ * @param {number} [nowMs] 倒计时基准时间
  * @returns {string}
  */
-export function buildStatusText(options, catalog, discoveryError, cliVersion) {
+export function buildStatusText(options, catalog, discoveryError, cliVersion, pricing, nowMs = Date.now()) {
   const lines = [`Qoder provider status (${PROVIDER_ID} / ${PROVIDER_NAME})`]
   lines.push(`- CLI: ${options.cliPath}${cliVersion ? ` (${cliVersion})` : ""}`)
   lines.push(
@@ -76,25 +79,37 @@ export function buildStatusText(options, catalog, discoveryError, cliVersion) {
   } else {
     lines.push("- Last call: none yet")
   }
+  const pricingLine = pricingStatusLine(pricing, nowMs)
+  if (pricingLine) lines.push(pricingLine)
   return lines.join("\n")
 }
 
 /**
  * 拼出 `/qoder models` 文案。
  *
+ * 有倍率快照时，在每个模型行尾追加「当前倍率 + 促销态」；缺失快照时保持原样。
+ *
  * @param {Array<{ id: string, modelID: string, name: string }>} catalog
  * @param {string|undefined} discoveryError
+ * @param {Record<string, any>|null|undefined} [pricing] 每模型倍率快照
+ * @param {number} [nowMs] 倒计时基准时间
  * @returns {string}
  */
-export function buildModelsText(catalog, discoveryError) {
+export function buildModelsText(catalog, discoveryError, pricing, nowMs = Date.now()) {
   const lines = [`Qoder models (${catalog.length})`]
   if (discoveryError) {
     lines.push(`Discovery failed: ${discoveryError}`)
     lines.push("Showing the placeholder catalog; run `/qoder login` and `/qoder refresh` after authenticating.")
   }
+  const byModelKey = new Map()
+  for (const model of Array.isArray(pricing?.models) ? pricing.models : []) {
+    if (typeof model?.modelKey === "string") byModelKey.set(model.modelKey, model)
+  }
   const width = catalog.reduce((max, entry) => Math.max(max, entry.id.length), 0)
   for (const entry of catalog) {
-    lines.push(`- ${PROVIDER_ID}/${entry.id.padEnd(width)}  ${entry.name}`)
+    const pricingText = modelPricingLine(byModelKey.get(entry.modelID), nowMs)
+    const suffix = pricingText ? `  ${pricingText}` : ""
+    lines.push(`- ${PROVIDER_ID}/${entry.id.padEnd(width)}  ${entry.name}${suffix}`)
   }
   return lines.join("\n")
 }

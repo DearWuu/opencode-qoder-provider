@@ -8,6 +8,7 @@ import {
   DEFAULT_TIMEOUT_MS,
   resolveOptions,
 } from "../src/options.mjs"
+import { PRICING_TIMEOUT_MS, PRICING_TTL_MS } from "../src/pricing.mjs"
 
 test("resolveOptions rejects an invalid permissionMode instead of falling back", () => {
   assert.throws(() => resolveOptions({ permissionMode: "yolo" }, {}), /Invalid permissionMode "yolo"/)
@@ -102,5 +103,20 @@ test("contextLimit defaults to 200000 and rejects malformed values", () => {
   assert.equal(resolveOptions({ contextLimit: "131072" }, {}).contextLimit, 131_072)
   for (const bad of [0, -1, "abc", {}, Number.NaN]) {
     assert.throws(() => resolveOptions({ contextLimit: bad }, {}), /Invalid contextLimit/)
+  }
+})
+
+test("pricingTtlMs and pricingTimeoutMs use defaults and reject malformed values", () => {
+  const defaults = resolveOptions({}, {})
+  assert.equal(defaults.pricingTtlMs, PRICING_TTL_MS)
+  assert.equal(defaults.pricingTimeoutMs, PRICING_TIMEOUT_MS)
+  assert.equal(resolveOptions({ pricingTtlMs: "5000" }, {}).pricingTtlMs, 5000)
+  assert.equal(resolveOptions({}, { QODER_PRICING_TTL_MS: "5000" }).pricingTtlMs, 5000)
+  assert.equal(resolveOptions({ pricingTimeoutMs: "1500" }, {}).pricingTimeoutMs, 1500)
+  assert.equal(resolveOptions({}, { QODER_PRICING_TIMEOUT_MS: "1500" }).pricingTimeoutMs, 1500)
+  assert.equal(resolveOptions({}, { QODER_PRICING_TIMEOUT_MS: " " }).pricingTimeoutMs, PRICING_TIMEOUT_MS)
+  for (const bad of [0, -1, "abc", Number.NaN]) {
+    assert.throws(() => resolveOptions({ pricingTtlMs: bad }, {}), /Invalid pricingTtlMs/)
+    assert.throws(() => resolveOptions({ pricingTimeoutMs: bad }, {}), /Invalid pricingTimeoutMs/)
   }
 })

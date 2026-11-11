@@ -1,7 +1,7 @@
 /**
  * 文件职责：OpenCode 服务端插件入口：注册 Qoder provider 与模型目录、`/qoder` 命令、`qoder` RPC。
  * 上游：OpenCode 插件加载器调用 QoderProviderPlugin.setup。
- * 下游：src/catalog、src/catalog-sync、src/command、src/logger、src/models、src/options、src/provider、src/quota、src/stats、rpc.ts、provider.mjs。
+ * 下游：src/catalog、src/catalog-sync、src/command、src/logger、src/models、src/options、src/pricing、src/provider、src/quota、src/stats、rpc.ts、provider.mjs。
  */
 import { Plugin } from "@opencode/plugin"
 import type { Model } from "@opencode/schema/model"
@@ -14,6 +14,8 @@ import { buildLoginText, buildModelsText, buildStatusText, buildUsageText, parse
 import { readCallLog } from "./src/logger.mjs"
 import { buildModelCatalog } from "./src/models.mjs"
 import { PROVIDER_ID, PROVIDER_NAME, resolveOptions } from "./src/options.mjs"
+import { createPricingStore } from "./src/pricing.mjs"
+import { fetchPricingFromQoder } from "./src/pricing-qoder.mjs"
 import { createQoder } from "./src/provider.mjs"
 import { createQuotaStore, formatQuotaStatus } from "./src/quota.mjs"
 import { computeQoderStats } from "./src/stats.mjs"
@@ -49,6 +51,18 @@ export const QoderProviderPlugin = Plugin.define({
       cliPath: options.cliPath,
       cwd: options.cwd,
       readUsage: typeof readUsage === "function" ? readUsage : undefined,
+    })
+    // 默认真实提取器只跑 `--list-models`（零模型调用）；测试/后续接入仍可经 options.fetchPricing 注入覆盖。
+    const injectedFetchPricing = (ctx.options as any)?.fetchPricing
+    const pricingStore = createPricingStore({
+      ttlMs: options.pricingTtlMs,
+      fetchPricing: typeof injectedFetchPricing === "function"
+        ? injectedFetchPricing
+        : () => fetchPricingFromQoder({
+            cliPath: options.cliPath,
+            cwd: options.cwd,
+            timeoutMs: options.pricingTimeoutMs,
+          }),
     })
 
     let catalog: CatalogEntry[] = PLACEHOLDER_CATALOG
@@ -110,17 +124,26 @@ export const QoderProviderPlugin = Plugin.define({
         // 发现成功才广播；失败保留旧目录且不打扰其他 location。
         // 各 location 的本地目录更新与 provider.reload() 都由订阅回调统一执行，含本实例。
         if (ok) await catalogSync.publish(catalog)
-        const quota = await quotaStore.read({ refresh: true })
+        const [quota] = await Promise.all([
+          quotaStore.read({ refresh: true }),
+          pricingStore.read({ refresh: true }),
+        ])
         const catalogText = ok
           ? `Refreshed the Qoder model catalog: ${catalog.length} models (${preview(catalog)}).`
           : `Could not refresh the Qoder model catalog: ${discoveryError}\nThe previous catalog (${preview(catalog)}) stays active.`
         return `${catalogText}\n${formatQuotaStatus(quota)}`
       }
-      if (subcommand === "models") return buildModelsText(catalog, discoveryError)
+      if (subcommand === "models") {
+        const pricing = await pricingStore.read()
+        return buildModelsText(catalog, discoveryError, pricing, Date.now())
+      }
       if (subcommand === "login") return buildLoginText(options.cliPath)
       if (subcommand === "status") {
-        const quota = await quotaStore.read({ refresh: true })
-        return `${buildStatusText(options, catalog, discoveryError, cliVersion)}\n${formatQuotaStatus(quota)}`
+        const [quota, pricing] = await Promise.all([
+          quotaStore.read({ refresh: true }),
+          pricingStore.read(),
+        ])
+        return `${buildStatusText(options, catalog, discoveryError, cliVersion, pricing, Date.now())}\n${formatQuotaStatus(quota)}`
       }
       return buildUsageText()
     }
@@ -180,11 +203,15 @@ export const QoderProviderPlugin = Plugin.define({
       quota: async (input) => quotaStore.read({
         refresh: (input as { refresh?: boolean }).refresh === true,
       }),
+      pricing: async (input) => pricingStore.read({
+        refresh: (input as { refresh?: boolean }).refresh === true,
+      }),
     })
 
     return async () => {
       catalogSync.dispose()
       quotaStore.dispose()
+      pricingStore.dispose()
       await rpcRegistration.dispose()
     }
   },

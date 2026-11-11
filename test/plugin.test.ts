@@ -9,6 +9,26 @@ import { QoderProviderPlugin } from "../index.ts"
 
 const FAKE_CLI = fileURLToPath(new URL("./fixtures/fake-qoder.mjs", import.meta.url))
 const OFFICIAL_USAGE = readFileSync(fileURLToPath(new URL("./fixtures/official-usage.txt", import.meta.url)), "utf8")
+const PRICING_SNAPSHOT = {
+  models: [
+    {
+      modelKey: "Qwen3.8-Max",
+      priceFactor: 0.4,
+      originalPriceFactor: 0.8,
+      promotion: {
+        active: true,
+        beforePromotionPriceFactor: 0.8,
+        windowStart: "22:00",
+        windowEnd: "08:00",
+        timezone: "Asia/Shanghai",
+        badge: "错峰 4 折",
+      },
+    },
+    { modelKey: "Auto", priceFactor: 1 },
+  ],
+  fetchedAt: "2026-11-11T10:00:00.000Z",
+  source: "fixture",
+}
 
 interface Harness {
   ctx: any
@@ -20,10 +40,11 @@ interface Harness {
   rpcHandlers: any[]
   rpcDisposed: { disposed: number }
   quotaReads: any[]
+  pricingFetches: { count: number }
   reloads: { count: number }
 }
 
-function createHarness(options: { directory?: string } = {}): Harness {
+function createHarness(options: { directory?: string; pricing?: any } = {}): Harness {
   const dir = options.directory ?? mkdtempSync(join(tmpdir(), "qoder-plugin-test-"))
   const providerAdds: any[] = []
   const commands: any[] = []
@@ -33,6 +54,7 @@ function createHarness(options: { directory?: string } = {}): Harness {
   const rpcHandlers: any[] = []
   const rpcState = { disposed: 0 }
   const quotaReads: any[] = []
+  const pricingFetches = { count: 0 }
   const reloads = { count: 0 }
   let transformCallback: ((editor: any) => void) | undefined
   const editor = {
@@ -53,6 +75,12 @@ function createHarness(options: { directory?: string } = {}): Harness {
       readUsage: async (input: any) => {
         quotaReads.push(input)
         return OFFICIAL_USAGE
+      },
+      // 始终注入抓取器：避免单元测试触发真实提取器的 --list-models spawn。
+      fetchPricing: async () => {
+        if (options.pricing === undefined) return null
+        pricingFetches.count += 1
+        return options.pricing
       },
     },
     location: { directory: dir },
@@ -102,7 +130,7 @@ function createHarness(options: { directory?: string } = {}): Harness {
     },
   }
 
-  return { ctx, providerAdds, commands, sdkHooks, synthetic, rpcDefinitions, rpcHandlers, rpcDisposed: rpcState, quotaReads, reloads }
+  return { ctx, providerAdds, commands, sdkHooks, synthetic, rpcDefinitions, rpcHandlers, rpcDisposed: rpcState, quotaReads, pricingFetches, reloads }
 }
 
 test("the plugin registers the qoder provider with the aisdk package", async () => {
@@ -268,7 +296,7 @@ test("the plugin registers the qoder RPC contract", async () => {
 
   assert.equal(harness.rpcDefinitions.length, 1)
   assert.equal(harness.rpcDefinitions[0].id, "qoder")
-  assert.deepEqual(Object.keys(harness.rpcDefinitions[0].methods), ["execute", "stats", "quota"])
+  assert.deepEqual(Object.keys(harness.rpcDefinitions[0].methods), ["execute", "stats", "quota", "pricing"])
 })
 
 test("the RPC and the server command answer with the same text", async () => {
@@ -312,6 +340,44 @@ test("the quota RPC returns official values and serves the second read from cach
   assert.match(status.text, /Quota: 6,872 \/ 10,000 used \(69%\)/)
   assert.match(status.text, /Quota source: Qoder CLI \/usage/)
   assert.equal(harness.quotaReads.length, 2)
+})
+
+test("the pricing RPC returns the injected snapshot and serves the second read from cache", async () => {
+  const harness = createHarness({ pricing: PRICING_SNAPSHOT })
+  await QoderProviderPlugin.setup(harness.ctx as never)
+
+  const first = await harness.rpcHandlers[0].pricing({ refresh: false }, {} as never)
+  assert.equal(first.source, "fixture")
+  assert.equal(first.models[0].modelKey, "Qwen3.8-Max")
+  const second = await harness.rpcHandlers[0].pricing({}, {} as never)
+  assert.equal(second.models[0].priceFactor, 0.4)
+  assert.equal(harness.pricingFetches.count, 1)
+})
+
+test("/qoder models and status show the per-model factor and the low-peak summary", async () => {
+  const harness = createHarness({ pricing: PRICING_SNAPSHOT })
+  await QoderProviderPlugin.setup(harness.ctx as never)
+
+  await harness.commands[0].execute({ sessionID: "session-1", prompt: { text: "/qoder models" }, delivery: "steer" })
+  const modelsText = harness.synthetic[0].text as string
+  assert.match(modelsText, /Qwen3\.8-Max\s+0\.40x 低峰 · .+后恢复 0\.80x/)
+  assert.match(modelsText, /- qoder\/auto\s+Auto  1\.00x/)
+
+  await harness.commands[0].execute({ sessionID: "session-1", prompt: { text: "/qoder status" }, delivery: "steer" })
+  const statusText = harness.synthetic[1].text as string
+  assert.match(statusText, /- Pricing: 低峰进行中/)
+  assert.equal(harness.pricingFetches.count, 1)
+})
+
+test("/qoder refresh also refreshes the pricing snapshot", async () => {
+  const harness = createHarness({ pricing: PRICING_SNAPSHOT })
+  await QoderProviderPlugin.setup(harness.ctx as never)
+
+  await harness.commands[0].execute({ sessionID: "session-1", prompt: { text: "/qoder refresh" }, delivery: "steer" })
+  assert.equal(harness.pricingFetches.count, 1)
+
+  await harness.commands[0].execute({ sessionID: "session-1", prompt: { text: "/qoder refresh" }, delivery: "steer" })
+  assert.equal(harness.pricingFetches.count, 2)
 })
 
 test("the plugin disposes the RPC registration when it is unloaded", async () => {

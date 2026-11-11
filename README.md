@@ -7,6 +7,7 @@
 - runtime 直接 spawn 已登录的 Qoder CLI，**不启动 HTTP 代理**，不改全局配置，不动现有 provider/model 的默认选择
 - 每条回答附带 Credits、Qoder session id，并写入无 prompt 的 JSONL 调用日志
 - 侧边栏同时展示本地 Today 与官方 Qoder CLI `/usage` 的真实套餐额度；额度读取不发送模型 prompt
+- 侧边栏与 `/qoder` 命令展示每模型实时积分倍率与低峰折扣倒计时；倍率来自 `--list-models` 解密明文的捕获（零模型调用），窗口按 `HH:mm` + IANA 时区每日重复，快照缓存 10 分钟，抓取失败时保留上一份数据
 
 
 ## 安装
@@ -93,9 +94,9 @@ Herdr 不是安装或使用本插件的前置依赖。需要多子代理编排�
 
 | 命令 | 作用 |
 | --- | --- |
-| `/qoder` 或 `/qoder status` | CLI 路径与版本、认证情况、模型数、权限模式、双超时、日志文件、最近调用，以及官方 `/usage` 额度来源/结果/错误。**不调用模型** |
-| `/qoder refresh` | 重新执行 `--list-models`，成功后把新目录同步给所有已加载 location（各自 `provider.reload()`），并主动刷新官方 `/usage` 额度；随后刷新当前 location 的 TUI 模型列表 |
-| `/qoder models` | 列出可选的 `qoder/*` ID 与对应原始模型名 |
+| `/qoder` 或 `/qoder status` | CLI 路径与版本、认证情况、模型数、权限模式、双超时、日志文件、最近调用、官方 `/usage` 额度来源/结果/错误，以及 Pricing 摘要（低峰进行中或倒计时进入低峰；无倍率快照时整行省略）。**不调用模型** |
+| `/qoder refresh` | 重新执行 `--list-models`，成功后把新目录同步给所有已加载 location（各自 `provider.reload()`），主动刷新官方 `/usage` 额度，并刷新每模型倍率快照；随后刷新当前 location 的 TUI 模型列表 |
+| `/qoder models` | 列出可选的 `qoder/*` ID 与对应原始模型名；有倍率快照时在行尾追加当前倍率与促销态 |
 | `/qoder login` | 打印终端登录指引（不执行登录、不伪造成功） |
 
 **TUI 里**：`/qoder` 由 TUI 插件的 keymap 接管，结果直接弹在原生 dialog（标题 `Qoder`）里；RPC 命令失败时弹 error toast。官方额度不可用只在面板和 status 中显示 `unavailable` 及原因，不弹 toast。`/qoder refresh` 之后会 `invalidate` + `sync` 当前 location 的模型列表，模型选择器立刻拿到新目录。
@@ -129,6 +130,8 @@ curl -u "opencode:<口令>" -X POST \
 
 `quota` 方法接受可选 `{ "refresh": boolean }`，返回 `available`、`source`、`used`、`total`、`remaining`、`percentage`、`expiresAt`、`fetchedAt`、`cached`、`error`。`refresh=false` 使用 5 分钟内存缓存，缓存缺失/到期才读取官方 CLI；`refresh=true` 主动刷新，并发请求单飞。`available=false` 时数值字段只是稳定 schema 的零值占位，UI 不展示这些占位值，而显示 `Quota unavailable`。
 
+`pricing` 方法接受可选 `{ "refresh": boolean }`，返回每模型倍率快照或 `null`。快照结构为 `{ models: [{ modelKey, qoderKey?, priceFactor, originalPriceFactor?, promotion? }], fetchedAt, source }`：`modelKey` 是目录展示名（与 catalog `modelID` 一致，如 `Qwen3.8-Max`），`qoderKey` 是 Qoder 内部 key（可选透传）；`priceFactor` 是当前生效倍率；`promotion` 携带 `active`、`discountFactor`、`beforePromotionPriceFactor`、`windowStart`、`windowEnd`、`timezone`、`badge`、`description`。`windowStart`/`windowEnd` 是每日重复的 `"HH:mm"` 墙上时间，`timezone` 为 IANA 时区（如 `Asia/Shanghai`），窗口可跨午夜。快照默认缓存 10 分钟，并发读取单飞；抓取失败或返回 `null` 时保留上一份成功快照，`fetchedAt` 只在成功时更新。默认提取器执行一次 `qoderclicn --list-models`，通过注入 CLI 进程的 `JSON.parse` 捕获 hook 读取解密后的目录明文（**零模型调用**）；未登录、超时、形状不符或未捕获时返回 `null`，不编造数据。可用 `options.fetchPricing` 注入覆盖。
+
 ## TUI 侧边栏 Credits 面板
 
 TUI 插件在侧边栏（`sidebar.content` slot）常驻 **Qoder Credits** 面板：
@@ -138,12 +141,19 @@ Qoder Credits
 Today 26.57
 6,872 / 10,000（已使用 69%）
 剩余 3,128 · 距离重置还有 10 天
+模型倍率
+Qwen3.8-Max 0.50x 1 小时 0 分后进入错峰 4 折
+GLM-5.3 0.10x 低峰 · 30 分后恢复 0.50x
+10:00 更新
 ```
 
 - **Today** 来自本地 `calls.jsonl`，固定两位小数；stats 每 15 秒只读本地日志，不触发配额或模型调用。
 - **额度两行**来自已安装 Qoder CLI 的官方交互式 `/usage`：已用/总额使用千分位，百分比四舍五入；剩余额度由官方 used/total 相减，重置天数按 `expiresAt` 与当前时间向上取整且不为负。
-- 面板挂载、用户主动 status/refresh 或 5 分钟 TTL 到期时读取额度；并发读取单飞，进程超时/中止会清理 PTY。缓存只在内存中，不写额度文件。
+- **模型倍率**来自 `pricing` RPC：每个模型一行「显示名 + 当前倍率 + 促销态」，尾行是本机时区的抓取时间。低峰进行中显示到下一次 `windowEnd` 的倒计时与恢复倍率；未开始时显示到下一次 `windowStart` 的倒计时与徽标原文（如「错峰 4 折」），不乘 `discountFactor`；窗口或时区缺失时只显示当前倍率。没有快照时整段隐藏，不展示占位值。窗口是每日墙上时间（`HH:mm` + IANA 时区），可跨午夜。
+- 面板每 15 秒同时刷新 stats、quota 与 pricing；quota 与 pricing 命中服务端内存缓存（pricing 默认 10 分钟），并发读取单飞，不产生模型调用。
+- 面板挂载、用户主动 status/refresh 或缓存到期时读取额度与倍率；并发读取单飞，进程超时/中止会清理 PTY。缓存只在内存中，不写额度或倍率文件。
 - 官方输出缺少明确额度或到期时间、存在多个无法确认口径的额度、CLI 未登录或 PTY 失败时，只显示 `Today` 与 `Quota unavailable`，不估算、不拼接多项额度、不显示伪零值。status dialog 展示 `Qoder CLI /usage` 来源、抓取时间与具体错误。
+- 倍率抓取失败时保留上一份成功快照，抓取时间不前进；从未成功抓取时整段隐藏。倍率只进入面板与 `/qoder` 命令输出，不修改 `/models` 里的模型名称。
 - stats RPC 失败时面板显示 `stats unavailable: …`；quota 失败不弹 toast。点击标题等价于 `/qoder status`。
 
 ## 配置项
@@ -157,6 +167,8 @@ Today 26.57
 | `timeoutMs` | `QODER_TIMEOUT_MS` | `1800000`（30 分钟） | 单次调用总超时，从 spawn 起计时且不被输出活动重置；超时后终止整个进程树，非法值直接报错。环境变量为空白视同未设置 |
 | `idleTimeoutMs` | `QODER_IDLE_TIMEOUT_MS` | `180000`（3 分钟） | stdout/stderr 无活动超时；任一输出活动重置 idle timer，但不重置总超时。非法值直接报错，环境变量为空白视同未设置 |
 | `contextLimit` | — | `200000` | 推导近似 token 数用的上下文窗口（见「限制与已知问题」的近似说明），非法值直接报错 |
+| `pricingTtlMs` | `QODER_PRICING_TTL_MS` | `600000`（10 分钟） | 每模型倍率快照的内存缓存时长；抓取失败保留旧快照且不更新抓取时间，非法值直接报错。环境变量为空白视同未设置 |
+| `pricingTimeoutMs` | `QODER_PRICING_TIMEOUT_MS` | `30000`（30 秒） | 单次倍率提取（`--list-models` + 捕获 hook）的总超时；超时终止整个进程树并保留旧快照。非法值直接报错，环境变量为空白视同未设置 |
 | `logFile` | `QODER_LOG_FILE` | `${XDG_STATE_HOME:-~/.local/state}/opencode/qoder-provider/calls.jsonl` | JSONL 调用日志（目录 0700、文件 0600） |
 | `additionalDirs` | — | `[]` | 字符串数组，逐个映射为 `--add-dir <dir>`，把这些目录**扩大**进 Qoder 的工作区范围（扩权操作，路径写错不会报错只会扩错地方） |
 | `cliTools` | — | 不传（CLI 用自身默认） | 字符串数组映射为 `--tools <t>…`（允许清单）；传 `[]`（空数组）或 `""`（空串）都映射为 `--tools ""`，**禁用** Qoder CLI 全部内置工具；`["default"]` 恢复全部。传其他类型或数组里含空字符串会直接报错。不传该选项才是「CLI 自身默认工具集」 |
@@ -191,6 +203,7 @@ Today 26.57
 
 - **双超时与取消**：`idleTimeoutMs` 只衡量 stdout/stderr 静默，`timeoutMs` 限制总运行时长；超时错误分别包含无活动毫秒数或总超时毫秒数。`doGenerate` 抛错，`doStream` 投递 error part；idle/total/abort 均终止整个进程树并清理 timer/listener。
 - **官方额度只读 CLI 输出**：配额 helper 经 `node-pty` 自动处理 trust 页，除 trust 确认外只发送 `/usage`，不发送模型 prompt。缺字段、企业套餐不支持或输出口径不一致时返回 `unavailable`，多项额度没有官方总计时不会聚合。OpenCode 的 Bun 运行时通过同一插件内的 Node 桥接执行 PTY；需要 `node` 在 PATH 中，也可用 `QODER_NODE_PATH` 指定。
+- **倍率提取只读目录明文**：默认提取器执行一次 `qoderclicn --list-models`，经 `NODE_OPTIONS` 注入 `JSON.parse` 捕获 hook 读取 CLI 解密后的模型目录；只含模型名、倍率与促销窗口，不请求账户接口、不运行模型、不读取凭证。捕获文件写在系统临时目录，读取后立即删除；`NODE_OPTIONS` 与既有值合并而不是覆盖。CLI 未登录、超时、输出形状不符或未捕获时返回 `null`，面板与命令隐藏倍率信息并保留上一份成功快照。
 - **stdin 体积上限**：`qoderclicn` 1.1.85 会把 stdin 截断到 **8388608 字节**（截断时只打印一行 warning）。本插件在 **7340032 字节（7 MiB）** 就直接报错 `PromptTooLargeError`，避免静默截断导致回答莫名其妙地少一截。
 - **上下文 token 展示值是近似推导**：Qoder CLI 的 `usage`/`modelUsage` token 计数恒为 0（OpenCode 因此显示不出 `tokens / % used` 指示）。插件在 token 计数缺失或为 0 且 `usage.context_usage_ratio` 有效（0<r≤1）时，按 `round(ratio × contextLimit)` 推导 `inputTokens.total`；真实非零 token 永远优先、不被覆盖。`contextLimit` 默认 200000、可配置（同时写入模型元数据的 `limit.context`，**不是 Qoder 实测上限**）；`providerMetadata.qoder` 记录 `contextUsageRatio` 与 `approximatedContextTokens` 标志标明该值为估算。
 - **只支持文本**：capabilities 为 `{tools: false, input: ["text"], output: ["text"]}`。prompt 里出现图片/文件会**明确报错**（`UnsupportedMediaError`），不会静默丢弃。
@@ -213,6 +226,7 @@ Today 26.57
 - **不含凭证**：插件代码与仓库不包含任何密钥、token、凭据或真实调用日志；密钥只可能存在于本机的 Qoder CLI 登录态里，插件不读取、不转发、不落盘。
 - **日志脱敏**：`calls.jsonl` 只记录模型名、Credits/用量元数据与 session 标识，**不含 prompt、回答与任何凭证**；日志目录按 0700、文件按 0600 创建，对已存在的文件 best-effort 收紧权限。
 - **本地运行边界**：模型调用 spawn 本机已登录的 `qoderclicn`，工作区限定在 `--cwd`（当前 OpenCode 目录）；配额读取通过本机 CLI 的官方 `/usage` 获取，由 Qoder CLI 自己使用既有登录态访问服务，插件不读取/解密 token，也不直接发送 Bearer HTTP 请求，不启动 HTTP 代理。`additionalDirs`（`--add-dir`）与 `cliTools`（`--tools`）会改变模型调用的工作区/工具边界——前者**扩大** Qoder 可写目录、属扩权操作，后者可用 `--tools ""` 完全禁用 Qoder 内置工具。超时/取消/中止都会终止整个子进程树（Windows 走 `taskkill /t /f`）。
+- **倍率捕获边界**：捕获 hook 只包装 `JSON.parse`，把含 `price_factor` 的目录明文写到系统临时目录，读取后删除；不接触 prompt、回答、token 或登录凭证。`NODE_OPTIONS` 只追加 `--import`，不覆盖已有参数。
 - **Qoder CLI 内层权限默认放开**：未显式配置 `permissionMode` 时以 `bypass_permissions` 运行，Qoder 不再逐项确认文件修改和命令执行，模型可修改 `--cwd` 内文件并执行命令，**风险自担**。显式配置 `default` 可恢复逐项确认；`additionalDirs` 等工作区边界仍独立生效。
 
 ## 目录结构
@@ -221,8 +235,8 @@ Today 26.57
 | --- | --- |
 | `index.ts` | OpenCode 服务端插件。`Plugin.define` + `ctx.provider.transform` 注册 provider 与模型，`ctx.command.transform` 注册 `/qoder`，`ctx.aisdk.hook("sdk")` 把 provider runtime 交给 OpenCode，`ctx.rpc.register` 注册 `qoder` RPC |
 | `tui.ts` | OpenCode TUI 插件。注册 `/qoder` slash 命令，调用 `qoder` RPC 拿结果，用原生 dialog 显示；并在 `sidebar.content` slot 挂载 Credits 面板 |
-| `panel.tsx` | 侧边栏 Qoder Credits 面板：15 秒读取本地 stats 与 quota 缓存，点击标题打开 status 对话框 |
-| `rpc.ts` | RPC 契约：`qoder` id、`execute`、`stats`、`quota` 三个方法，server 与 TUI 共用 |
+| `panel.tsx` | 侧边栏 Qoder Credits 面板：15 秒读取本地 stats、quota 与 pricing 缓存，展示今日消耗、官方额度与每模型倍率；点击标题打开 status 对话框 |
+| `rpc.ts` | RPC 契约：`qoder` id、`execute`、`stats`、`quota`、`pricing` 四个方法，server 与 TUI 共用 |
 | `provider.mjs` | provider runtime。导出 `createQoder(options)`，返回带 `languageModel(modelID)` 的 provider（AI SDK **LanguageModelV3**） |
 | `src/options.mjs` | 选项与默认值解析（CLI 路径、权限模式、超时、日志位置） |
 | `src/models.mjs` | Qoder 模型名 ↔ OpenCode 模型 ID 映射、目录解析 |
@@ -235,6 +249,9 @@ Today 26.57
 | `src/stats.mjs` | 调用日志 → 面板数据聚合（total/today/last，纯函数、时钟可注入） |
 | `src/credits.mjs` | Today、官方额度、到期天数与错误行的纯格式化 |
 | `src/quota.mjs` | 官方 `/usage` 解析、5 分钟缓存、单飞与 status 文案 |
+| `src/pricing.mjs` | 每模型倍率快照的 10 分钟缓存、单飞、失败保留，每日时段换算，以及倍率/倒计时/促销态文案 |
+| `src/pricing-qoder.mjs` | 默认倍率提取器：`--list-models` + 捕获 hook、形状校验、超时/进程树终止与失败降级 |
+| `src/pricing-capture.mjs` | 注入 CLI 进程的 `JSON.parse` 捕获 hook；只在设置捕获目录时把目录明文写入临时文件 |
 | `src/quota-cli.mjs` | `/usage` 交互流程、trust 处理、面板/桥接选择与进程清理 |
 | `src/quota-pty.mjs` | Bun 运行时的 Node 桥接入口，执行同一次 `node-pty` `/usage` 并 JSON 回传 |
 | `src/poller.mjs` | 15 秒轮询器（timer 可注入） |
@@ -252,9 +269,9 @@ npm run check     # tsc --noEmit
 
 另有可选的 `npm test`（Bun）与 `npm run check:catalog`。后者会用真实 Qoder CLI 读取一次 `--list-models`，只用于本地人工检查；自动化测试与 CI 不运行它。
 
-测试用 `test/fixtures/fake-qoder.mjs` 与假 PTY，**不消耗 Credits、不联网、不需要登录**。覆盖：模型 ID 与冲突、prompt 序列化与媒体报错、doGenerate/doStream V3 事件、明确回落拒绝、Credits metadata 与日志脱敏、默认/显式权限 argv、idle/total/abort 错误传播、父子进程清理与活动诊断。官方额度使用录制 `/usage` 输出，覆盖解析、缺字段/多额度 unavailable、千分位/百分比/到期天数、5 分钟 TTL、单飞、超时/abort 清理与零模型 prompt。
+测试用 `test/fixtures/fake-qoder.mjs` 与假 PTY，**不消耗 Credits、不联网、不需要登录**。覆盖：模型 ID 与冲突、prompt 序列化与媒体报错、doGenerate/doStream V3 事件、明确回落拒绝、Credits metadata 与日志脱敏、默认/显式权限 argv、idle/total/abort 错误传播、父子进程清理与活动诊断。官方额度使用录制 `/usage` 输出，覆盖解析、缺字段/多额度 unavailable、千分位/百分比/到期天数、5 分钟 TTL、单飞、超时/abort 清理与零模型 prompt。倍率覆盖每日时段换算（跨午夜/非本机时区/非法输入）、提取器纯解析与 fake CLI 捕获集成、`NODE_OPTIONS` 合并、超时/失败降级、10 分钟 TTL、单飞、失败保留旧快照、默认 `null`、倍率/倒计时边界、促销三态与面板/命令文案。
 
-另外覆盖 TUI 与 RPC：三个 RPC 方法的形状、`/qoder` slash 注册、侧边栏 slot 注册、命令成功 dialog 与 RPC 失败 toast、refresh 模型列表、server command/RPC 文案一致、stats 不读取官方额度、插件卸载清理；面板侧覆盖本地 stats 聚合、真实额度与 unavailable 行、15 秒本地轮询和停止清理。
+另外覆盖 TUI 与 RPC：四个 RPC 方法的形状、`/qoder` slash 注册、侧边栏 slot 注册、命令成功 dialog 与 RPC 失败 toast、refresh 模型列表与倍率刷新、server command/RPC 文案一致、stats 不读取官方额度、插件卸载清理；面板侧覆盖本地 stats 聚合、真实额度与 unavailable 行、模型倍率段三态（无数据隐藏、低峰进行中、待进入低峰）、15 秒本地轮询和停止清理。
 
 ## 许可
 

@@ -16,7 +16,10 @@
  *  - FAKE_QODER_MODELS        newline separated model list for --list-models
  *  - FAKE_QODER_DISCOVERY_DELAY_MS  ms to wait before answering --list-models
  *  - FAKE_QODER_LIST_OUT_BYTES      extra stdout padding bytes for --list-models
- *  - FAKE_QODER_LIST_RECORD         append one JSON line {argv, cwd} per --list-models call
+ *  - FAKE_QODER_LIST_RECORD         append one JSON line {argv, cwd, nodeOptions} per --list-models call
+ *  - FAKE_QODER_LIST_EXIT           exit with this code before answering --list-models
+ *  - FAKE_QODER_PRICING             path of a catalog JSON for --list-models to JSON.parse
+ *                                   (exercises the NODE_OPTIONS capture hook)
  *  - FAKE_QODER_DELAY_MS            ms `slow` waits before answering (default 5000)
  *  - FAKE_QODER_PARTIAL_DELAY_MS    ms between emitted stream-json lines
  *  - FAKE_QODER_RESULT_FILE         written only when `slow` gets to answer
@@ -31,7 +34,7 @@
  *  - FAKE_QODER_EMPTY_STOP          "0": the empty text block gets no content_block_stop
  */
 import { spawn } from "node:child_process"
-import { appendFileSync, writeFileSync } from "node:fs"
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs"
 
 const argv = process.argv.slice(2)
 const mode = process.env.FAKE_QODER_MODE ?? "ok"
@@ -182,7 +185,22 @@ function flush(stream) {
 
 if (argv.includes("--list-models")) {
   if (process.env.FAKE_QODER_LIST_RECORD) {
-    appendFileSync(process.env.FAKE_QODER_LIST_RECORD, `${JSON.stringify({ argv, cwd: process.cwd() })}\n`)
+    appendFileSync(
+      process.env.FAKE_QODER_LIST_RECORD,
+      `${JSON.stringify({ argv, cwd: process.cwd(), nodeOptions: process.env.NODE_OPTIONS })}\n`,
+    )
+  }
+  if (process.env.FAKE_QODER_LIST_EXIT) {
+    const code = Number(process.env.FAKE_QODER_LIST_EXIT)
+    process.exit(Number.isFinite(code) && code !== 0 ? code : 1)
+  }
+  // 模拟真实 CLI：先 JSON.parse 解密后的目录明文，捕获 hook 才有机会截获。
+  if (process.env.FAKE_QODER_PRICING) {
+    try {
+      JSON.parse(readFileSync(process.env.FAKE_QODER_PRICING, "utf8"))
+    } catch {
+      // 保持 CLI 行为：解析失败仍然输出模型表。
+    }
   }
   const models = (process.env.FAKE_QODER_MODELS ?? "Auto\nFast\nQwen3.8-Max")
     .split("\n")
