@@ -20,10 +20,11 @@ interface Harness {
   rpcHandlers: any[]
   rpcDisposed: { disposed: number }
   quotaReads: any[]
+  reloads: { count: number }
 }
 
-function createHarness(): Harness {
-  const dir = mkdtempSync(join(tmpdir(), "qoder-plugin-test-"))
+function createHarness(options: { directory?: string } = {}): Harness {
+  const dir = options.directory ?? mkdtempSync(join(tmpdir(), "qoder-plugin-test-"))
   const providerAdds: any[] = []
   const commands: any[] = []
   const sdkHooks: Array<(input: any) => void> = []
@@ -32,6 +33,16 @@ function createHarness(): Harness {
   const rpcHandlers: any[] = []
   const rpcState = { disposed: 0 }
   const quotaReads: any[] = []
+  const reloads = { count: 0 }
+  let transformCallback: ((editor: any) => void) | undefined
+  const editor = {
+    list: () => [],
+    get: () => undefined,
+    add: (input: any) => providerAdds.push(input),
+    update: () => {},
+    remove: () => {},
+    models: { set: () => {}, update: () => {}, remove: () => {} },
+  }
 
   const ctx = {
     options: {
@@ -47,17 +58,15 @@ function createHarness(): Harness {
     location: { directory: dir },
     provider: {
       transform: async (callback: (editor: any) => void) => {
-        callback({
-          list: () => [],
-          get: () => undefined,
-          add: (input: any) => providerAdds.push(input),
-          update: () => {},
-          remove: () => {},
-          models: { set: () => {}, update: () => {}, remove: () => {} },
-        })
+        transformCallback = callback
+        callback(editor)
         return { dispose: async () => {} }
       },
-      reload: async () => {},
+      reload: async () => {
+        reloads.count += 1
+        // OpenCode 的 reload 会重放现有 transform；测试里同样重放，才能看到目录更新。
+        transformCallback?.(editor)
+      },
     },
     command: {
       transform: async (callback: (editor: any) => void) => {
@@ -93,7 +102,7 @@ function createHarness(): Harness {
     },
   }
 
-  return { ctx, providerAdds, commands, sdkHooks, synthetic, rpcDefinitions, rpcHandlers, rpcDisposed: rpcState, quotaReads }
+  return { ctx, providerAdds, commands, sdkHooks, synthetic, rpcDefinitions, rpcHandlers, rpcDisposed: rpcState, quotaReads, reloads }
 }
 
 test("the plugin registers the qoder provider with the aisdk package", async () => {
@@ -201,6 +210,57 @@ test("/qoder refresh reloads the provider", async () => {
   assert.equal(reloaded, 1)
   assert.match(harness.synthetic[0].text as string, /Refreshed the Qoder model catalog/)
 })
+
+test("refreshing one location syncs the catalog to every loaded location", async () => {
+  const recordFile = join(mkdtempSync(join(tmpdir(), "qoder-sync-test-")), "list-models.jsonl")
+  const previousModels = process.env.FAKE_QODER_MODELS
+  const previousRecord = process.env.FAKE_QODER_LIST_RECORD
+  const harnessA = createHarness()
+  const harnessB = createHarness()
+  let cleanupA: (() => Promise<void> | void) | undefined
+  let cleanupB: (() => Promise<void> | void) | undefined
+
+  try {
+    process.env.FAKE_QODER_MODELS = "Auto\nFast"
+    process.env.FAKE_QODER_LIST_RECORD = recordFile
+    cleanupA = (await QoderProviderPlugin.setup(harnessA.ctx as never)) ?? undefined
+    cleanupB = (await QoderProviderPlugin.setup(harnessB.ctx as never)) ?? undefined
+
+    // 两个 location 初始各发现一次；第二个 location 之后不得再执行发现。
+    assert.equal(listCalls(recordFile).length, 2)
+    assert.equal(harnessB.reloads.count, 0)
+
+    process.env.FAKE_QODER_MODELS = "Auto\nFast\nSynced"
+    await harnessA.commands[0].execute({ sessionID: "session-1", prompt: { text: "/qoder refresh" }, delivery: "steer" })
+
+    assert.equal(harnessA.reloads.count, 1)
+    assert.equal(harnessB.reloads.count, 1)
+    const latestB = harnessB.providerAdds[harnessB.providerAdds.length - 1]
+    assert.deepEqual(
+      latestB.models.map((model: any) => model.id),
+      ["auto", "fast", "synced"],
+    )
+
+    const calls = listCalls(recordFile)
+    assert.equal(calls.length, 3)
+    assert.equal(calls.filter((call) => call.cwd === harnessB.ctx.location.directory).length, 1)
+  } finally {
+    await cleanupA?.()
+    await cleanupB?.()
+    if (previousModels === undefined) delete process.env.FAKE_QODER_MODELS
+    else process.env.FAKE_QODER_MODELS = previousModels
+    if (previousRecord === undefined) delete process.env.FAKE_QODER_LIST_RECORD
+    else process.env.FAKE_QODER_LIST_RECORD = previousRecord
+  }
+})
+
+function listCalls(file: string): any[] {
+  return readFileSync(file, "utf8")
+    .trim()
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line))
+}
 
 test("the plugin registers the qoder RPC contract", async () => {
   const harness = createHarness()

@@ -1,7 +1,7 @@
 /**
  * 文件职责：OpenCode 服务端插件入口：注册 Qoder provider 与模型目录、`/qoder` 命令、`qoder` RPC。
  * 上游：OpenCode 插件加载器调用 QoderProviderPlugin.setup。
- * 下游：src/catalog、src/command、src/logger、src/models、src/options、src/provider、src/quota、src/stats、rpc.ts、provider.mjs。
+ * 下游：src/catalog、src/catalog-sync、src/command、src/logger、src/models、src/options、src/provider、src/quota、src/stats、rpc.ts、provider.mjs。
  */
 import { Plugin } from "@opencode/plugin"
 import type { Model } from "@opencode/schema/model"
@@ -9,6 +9,7 @@ import type { Provider } from "@opencode/schema/provider"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
 import { fetchCliVersion, fetchModelList } from "./src/catalog.mjs"
+import { createCatalogSync } from "./src/catalog-sync.mjs"
 import { buildLoginText, buildModelsText, buildStatusText, buildUsageText, parseSubcommand, preview } from "./src/command.mjs"
 import { readCallLog } from "./src/logger.mjs"
 import { buildModelCatalog } from "./src/models.mjs"
@@ -55,6 +56,18 @@ export const QoderProviderPlugin = Plugin.define({
     let cliVersion: string | undefined
     let discoveryGeneration = 0
 
+    // 目录状态按 location 隔离，但 refresh 的发现结果要同步给所有已加载 location：
+    // 广播到达时同时递增代数，让更早发起的慢发现不能覆盖广播结果。
+    const catalogSync = createCatalogSync({
+      location: options.cwd ?? ctx.location?.directory,
+      apply: async (entries: CatalogEntry[]) => {
+        discoveryGeneration += 1
+        catalog = entries
+        discoveryError = undefined
+        await ctx.provider.reload()
+      },
+    })
+
     const discover = async () => {
       const generation = ++discoveryGeneration
       try {
@@ -94,7 +107,9 @@ export const QoderProviderPlugin = Plugin.define({
 
       if (subcommand === "refresh") {
         const ok = await discover()
-        await ctx.provider.reload()
+        // 发现成功才广播；失败保留旧目录且不打扰其他 location。
+        // 各 location 的本地目录更新与 provider.reload() 都由订阅回调统一执行，含本实例。
+        if (ok) await catalogSync.publish(catalog)
         const quota = await quotaStore.read({ refresh: true })
         const catalogText = ok
           ? `Refreshed the Qoder model catalog: ${catalog.length} models (${preview(catalog)}).`
@@ -168,6 +183,7 @@ export const QoderProviderPlugin = Plugin.define({
     })
 
     return async () => {
+      catalogSync.dispose()
       quotaStore.dispose()
       await rpcRegistration.dispose()
     }

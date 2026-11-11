@@ -94,11 +94,13 @@ Herdr 不是安装或使用本插件的前置依赖。需要多子代理编排�
 | 命令 | 作用 |
 | --- | --- |
 | `/qoder` 或 `/qoder status` | CLI 路径与版本、认证情况、模型数、权限模式、双超时、日志文件、最近调用，以及官方 `/usage` 额度来源/结果/错误。**不调用模型** |
-| `/qoder refresh` | 重新执行 `--list-models`、`provider.reload()` 并主动刷新官方 `/usage` 额度，随后刷新 TUI 模型列表 |
+| `/qoder refresh` | 重新执行 `--list-models`，成功后把新目录同步给所有已加载 location（各自 `provider.reload()`），并主动刷新官方 `/usage` 额度；随后刷新当前 location 的 TUI 模型列表 |
 | `/qoder models` | 列出可选的 `qoder/*` ID 与对应原始模型名 |
 | `/qoder login` | 打印终端登录指引（不执行登录、不伪造成功） |
 
 **TUI 里**：`/qoder` 由 TUI 插件的 keymap 接管，结果直接弹在原生 dialog（标题 `Qoder`）里；RPC 命令失败时弹 error toast。官方额度不可用只在面板和 status 中显示 `unavailable` 及原因，不弹 toast。`/qoder refresh` 之后会 `invalidate` + `sync` 当前 location 的模型列表，模型选择器立刻拿到新目录。
+
+**目录同步**：任一 location 执行 `/qoder refresh` 成功后，同一服务进程内所有已加载 location 的 Qoder 模型目录一起更新；其他 location 不需要再次执行发现。发现失败时各 location 保留原目录，不广播。没有其他 location 时行为与单 location 一致。
 
 **通过 API 或非 TUI 客户端**：`/qoder` 由服务端命令处理，结果写进 session inbox（synthetic 消息），不唤醒会话。
 
@@ -121,7 +123,7 @@ curl -u "opencode:<口令>" -X POST \
   -d '{"input":{"text":"status"}}'
 ```
 
-返回 `{"output":{"text":"Qoder provider status ..."}}`。`text` 与 `/qoder` 命令的入参同义：`status`（默认）、`refresh`、`models`、`login`。
+返回 `{"output":{"text":"Qoder provider status ..."}}`。`text` 与 `/qoder` 命令的入参同义：`status`（默认）、`refresh`、`models`、`login`。`refresh` 由请求指定的 location 执行发现，成功后同步所有已加载 location 的模型目录。
 
 `stats` 方法无入参，返回：`provider`、`models`、`authenticated`、`permissionMode`、`cliVersion`、`totalCalls`、`totalCredits`、`todayCalls`、`todayCredits`、`lastModel`、`lastCredits`、`lastAt`、`lastError`。它只读 `calls.jsonl` 与模型目录，不启动配额 PTY、不调用模型、不联网。所有字段恒存在、恒非 null：未知字符串为 `""`、未知数值为 `0`（`lastAt === ""` 即"还没有调用"）。
 

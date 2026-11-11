@@ -16,6 +16,7 @@
  *  - FAKE_QODER_MODELS        newline separated model list for --list-models
  *  - FAKE_QODER_DISCOVERY_DELAY_MS  ms to wait before answering --list-models
  *  - FAKE_QODER_LIST_OUT_BYTES      extra stdout padding bytes for --list-models
+ *  - FAKE_QODER_LIST_RECORD         append one JSON line {argv, cwd} per --list-models call
  *  - FAKE_QODER_DELAY_MS            ms `slow` waits before answering (default 5000)
  *  - FAKE_QODER_PARTIAL_DELAY_MS    ms between emitted stream-json lines
  *  - FAKE_QODER_RESULT_FILE         written only when `slow` gets to answer
@@ -30,7 +31,7 @@
  *  - FAKE_QODER_EMPTY_STOP          "0": the empty text block gets no content_block_stop
  */
 import { spawn } from "node:child_process"
-import { writeFileSync } from "node:fs"
+import { appendFileSync, writeFileSync } from "node:fs"
 
 const argv = process.argv.slice(2)
 const mode = process.env.FAKE_QODER_MODE ?? "ok"
@@ -180,6 +181,9 @@ function flush(stream) {
 }
 
 if (argv.includes("--list-models")) {
+  if (process.env.FAKE_QODER_LIST_RECORD) {
+    appendFileSync(process.env.FAKE_QODER_LIST_RECORD, `${JSON.stringify({ argv, cwd: process.cwd() })}\n`)
+  }
   const models = (process.env.FAKE_QODER_MODELS ?? "Auto\nFast\nQwen3.8-Max")
     .split("\n")
     .map((line) => line.trim())
