@@ -176,12 +176,15 @@ export function modelPricingLine(model, nowMs = Date.now()) {
 
 /**
  * 面板「模型倍率」段：数据缺失或为空时返回空数组，让整段隐藏。
- * 每行 `{modelKey} {factor}x {促销态}`，尾行 `{HH:mm} 更新`（按本机时区）。
+ *
+ * 展开（默认）：`模型倍率 ▾` + 每行 `{modelKey} {factor}x {促销态}` + 尾行 `{HH:mm} 更新`。
+ * 折叠：只剩 `模型倍率 ▸ {有效模型数}` 一行。
+ * 两种状态的标题行都带 `action: "toggle-pricing"`，由面板接线到鼠标左键点击切换。
  *
  * 调用方：panel.tsx（经 createMemo 渲染面板行）。
  *
- * @param {{ pricing?: Record<string, any>|null, nowMs?: number }} [input]
- * @returns {Array<{ tone: "base"|"muted", text: string }>}
+ * @param {{ pricing?: Record<string, any>|null, nowMs?: number, collapsed?: boolean }} [input]
+ * @returns {Array<{ tone: "base"|"muted", text: string, action?: "toggle-pricing" }>}
  */
 export function pricingPanelLines(input = {}) {
   const pricing = input.pricing
@@ -196,7 +199,10 @@ export function pricingPanelLines(input = {}) {
     rows.push({ tone: "muted", text: `${key} ${detail}` })
   }
   if (rows.length === 0) return []
-  const lines = [{ tone: "base", text: "模型倍率" }, ...rows]
+  if (input.collapsed === true) {
+    return [{ tone: "base", text: `模型倍率 ▸ ${rows.length}`, action: "toggle-pricing" }]
+  }
+  const lines = [{ tone: "base", text: "模型倍率 ▾", action: "toggle-pricing" }, ...rows]
   const updated = formatUpdatedAt(pricing.fetchedAt)
   if (updated) lines.push({ tone: "muted", text: `${updated} 更新` })
   return lines

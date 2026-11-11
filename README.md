@@ -141,15 +141,19 @@ Qoder Credits
 Today 26.57
 6,872 / 10,000（已使用 69%）
 剩余 3,128 · 距离重置还有 10 天
-模型倍率
+模型倍率 ▾
 Qwen3.8-Max 0.50x 1 小时 0 分后进入错峰 4 折
 GLM-5.3 0.10x 低峰 · 30 分后恢复 0.50x
 10:00 更新
+⟳ 刷新
 ```
 
 - **Today** 来自本地 `calls.jsonl`，固定两位小数；stats 每 15 秒只读本地日志，不触发配额或模型调用。
 - **额度两行**来自已安装 Qoder CLI 的官方交互式 `/usage`：已用/总额使用千分位，百分比四舍五入；剩余额度由官方 used/total 相减，重置天数按 `expiresAt` 与当前时间向上取整且不为负。
 - **模型倍率**来自 `pricing` RPC：每个模型一行「显示名 + 当前倍率 + 促销态」，尾行是本机时区的抓取时间。低峰进行中显示到下一次 `windowEnd` 的倒计时与恢复倍率；未开始时显示到下一次 `windowStart` 的倒计时与徽标原文（如「错峰 4 折」），不乘 `discountFactor`；窗口或时区缺失时只显示当前倍率。没有快照时整段隐藏，不展示占位值。窗口是每日墙上时间（`HH:mm` + IANA 时区），可跨午夜。
+- **折叠模型倍率**：点击标题行在展开（`模型倍率 ▾` + 全部模型行 + 更新时间）与折叠（`模型倍率 ▸ {N}`，N 为有有效倍率的模型数）之间切换，默认展开。折叠状态只存在组件内存，TUI 重启后恢复展开，不写配置文件。Today 与额度三行不受折叠影响。
+- **手动刷新**：面板末尾固定一行 `⟳ 刷新`，点击后并发调用 `quota({ refresh: true })` 与 `pricing({ refresh: true })`，强制读取官方额度与模型倍率。刷新期间该行显示 `刷新中…`，重复点击被忽略。任一来源失败时保留旧数据且不弹 toast：额度已有旧值时继续显示旧值（从未取到额度时沿用 `Quota unavailable`），倍率保留上一份快照且抓取时间不前进。Today 仍来自本地日志，不参与刷新。
+- **交互方式**：折叠与刷新都由侧边栏文本的鼠标左键点击触发（`onMouseUp`，与面板标题打开 status 的交互一致）。这两处**未提供键盘可达路径**：面板行未设置 `focusable`，侧边栏 slot 也不在 OpenCode TUI 的焦点遍历范围内。
 - 面板每 15 秒同时刷新 stats、quota 与 pricing；quota 与 pricing 命中服务端内存缓存（pricing 默认 10 分钟），并发读取单飞，不产生模型调用。
 - 面板挂载、用户主动 status/refresh 或缓存到期时读取额度与倍率；并发读取单飞，进程超时/中止会清理 PTY。缓存只在内存中，不写额度或倍率文件。
 - 官方输出缺少明确额度或到期时间、存在多个无法确认口径的额度、CLI 未登录或 PTY 失败时，只显示 `Today` 与 `Quota unavailable`，不估算、不拼接多项额度、不显示伪零值。status dialog 展示 `Qoder CLI /usage` 来源、抓取时间与具体错误。
@@ -235,7 +239,8 @@ GLM-5.3 0.10x 低峰 · 30 分后恢复 0.50x
 | --- | --- |
 | `index.ts` | OpenCode 服务端插件。`Plugin.define` + `ctx.provider.transform` 注册 provider 与模型，`ctx.command.transform` 注册 `/qoder`，`ctx.aisdk.hook("sdk")` 把 provider runtime 交给 OpenCode，`ctx.rpc.register` 注册 `qoder` RPC |
 | `tui.ts` | OpenCode TUI 插件。注册 `/qoder` slash 命令，调用 `qoder` RPC 拿结果，用原生 dialog 显示；并在 `sidebar.content` slot 挂载 Credits 面板 |
-| `panel.tsx` | 侧边栏 Qoder Credits 面板：15 秒读取本地 stats、quota 与 pricing 缓存，展示今日消耗、官方额度与每模型倍率；点击标题打开 status 对话框 |
+| `panel.tsx` | 侧边栏 Qoder Credits 面板：15 秒读取本地 stats、quota 与 pricing 缓存，展示今日消耗、官方额度与每模型倍率；点击标题打开 status 对话框；点击「模型倍率」标题折叠/展开该段；点击末尾 `⟳ 刷新` 并发强制刷新额度与倍率 |
+| `src/panel-model.mjs` | 面板状态控制器：stats/quota/pricing 取数、手动刷新（防重复、失败保留旧值）与折叠开关 |
 | `rpc.ts` | RPC 契约：`qoder` id、`execute`、`stats`、`quota`、`pricing` 四个方法，server 与 TUI 共用 |
 | `provider.mjs` | provider runtime。导出 `createQoder(options)`，返回带 `languageModel(modelID)` 的 provider（AI SDK **LanguageModelV3**） |
 | `src/options.mjs` | 选项与默认值解析（CLI 路径、权限模式、超时、日志位置） |
@@ -247,9 +252,9 @@ GLM-5.3 0.10x 低峰 · 30 分后恢复 0.50x
 | `src/catalog.mjs` | `--list-models` / `--version` 调用 |
 | `src/command.mjs` | `/qoder` 的子命令解析与状态/目录/登录文案（server 与 TUI 共用同一份） |
 | `src/stats.mjs` | 调用日志 → 面板数据聚合（total/today/last，纯函数、时钟可注入） |
-| `src/credits.mjs` | Today、官方额度、到期天数与错误行的纯格式化 |
+| `src/credits.mjs` | Today、官方额度、到期天数、错误行与手动刷新行（`⟳ 刷新`）的纯格式化 |
 | `src/quota.mjs` | 官方 `/usage` 解析、5 分钟缓存、单飞与 status 文案 |
-| `src/pricing.mjs` | 每模型倍率快照的 10 分钟缓存、单飞、失败保留，每日时段换算，以及倍率/倒计时/促销态文案 |
+| `src/pricing.mjs` | 每模型倍率快照的 10 分钟缓存、单飞、失败保留，每日时段换算，以及倍率/倒计时/促销态与倍率段面板行文案 |
 | `src/pricing-qoder.mjs` | 默认倍率提取器：`--list-models` + 捕获 hook、形状校验、超时/进程树终止与失败降级 |
 | `src/pricing-capture.mjs` | 注入 CLI 进程的 `JSON.parse` 捕获 hook；只在设置捕获目录时把目录明文写入临时文件 |
 | `src/quota-cli.mjs` | `/usage` 交互流程、trust 处理、面板/桥接选择与进程清理 |
@@ -271,7 +276,7 @@ npm run check     # tsc --noEmit
 
 测试用 `test/fixtures/fake-qoder.mjs` 与假 PTY，**不消耗 Credits、不联网、不需要登录**。覆盖：模型 ID 与冲突、prompt 序列化与媒体报错、doGenerate/doStream V3 事件、明确回落拒绝、Credits metadata 与日志脱敏、默认/显式权限 argv、idle/total/abort 错误传播、父子进程清理与活动诊断。官方额度使用录制 `/usage` 输出，覆盖解析、缺字段/多额度 unavailable、千分位/百分比/到期天数、5 分钟 TTL、单飞、超时/abort 清理与零模型 prompt。倍率覆盖每日时段换算（跨午夜/非本机时区/非法输入）、提取器纯解析与 fake CLI 捕获集成、`NODE_OPTIONS` 合并、超时/失败降级、10 分钟 TTL、单飞、失败保留旧快照、默认 `null`、倍率/倒计时边界、促销三态与面板/命令文案。
 
-另外覆盖 TUI 与 RPC：四个 RPC 方法的形状、`/qoder` slash 注册、侧边栏 slot 注册、命令成功 dialog 与 RPC 失败 toast、refresh 模型列表与倍率刷新、server command/RPC 文案一致、stats 不读取官方额度、插件卸载清理；面板侧覆盖本地 stats 聚合、真实额度与 unavailable 行、模型倍率段三态（无数据隐藏、低峰进行中、待进入低峰）、15 秒本地轮询和停止清理。
+另外覆盖 TUI 与 RPC：四个 RPC 方法的形状、`/qoder` slash 注册、侧边栏 slot 注册、命令成功 dialog 与 RPC 失败 toast、refresh 模型列表与倍率刷新、server command/RPC 文案一致、stats 不读取官方额度、插件卸载清理；面板侧覆盖本地 stats 聚合、真实额度与 unavailable 行、模型倍率段三态（无数据隐藏、低峰进行中、待进入低峰）、模型倍率折叠两态与计数、刷新行文案、手动刷新并发 `refresh: true`、刷新中防重复、失败保留旧值、15 秒本地轮询和停止清理。
 
 ## 许可
 

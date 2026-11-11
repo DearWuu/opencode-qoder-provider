@@ -6,7 +6,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 
-import { creditsPanelLines, formatCredits, formatQuotaNumber, formatRelativeTime } from "../src/credits.mjs"
+import { creditsPanelLines, formatCredits, formatQuotaNumber, formatRelativeTime, panelFooterLines } from "../src/credits.mjs"
 
 const STATS = {
   provider: "qoder",
@@ -106,4 +106,10 @@ test("before the first results the panel shows loading lines", () => {
     { tone: "muted", text: "Today 1.23" },
     { tone: "muted", text: "Quota loading..." },
   ])
+})
+
+test("the footer offers an idle refresh action and shows progress while refreshing", () => {
+  assert.deepEqual(panelFooterLines(), [{ tone: "muted", text: "⟳ 刷新", action: "refresh" }])
+  assert.deepEqual(panelFooterLines({ refreshing: false }), [{ tone: "muted", text: "⟳ 刷新", action: "refresh" }])
+  assert.deepEqual(panelFooterLines({ refreshing: true }), [{ tone: "muted", text: "刷新中…", action: "refresh" }])
 })

@@ -8,8 +8,9 @@ import { For, createMemo, createSignal, onCleanup } from "solid-js"
 
 import type { Context } from "@opencode/plugin/tui/context"
 
-import { creditsPanelLines } from "./src/credits.mjs"
+import { creditsPanelLines, panelFooterLines } from "./src/credits.mjs"
 import { pricingPanelLines } from "./src/pricing.mjs"
+import { createCreditsPanelController } from "./src/panel-model.mjs"
 import { createStatsPoller } from "./src/poller.mjs"
 import { QoderRpc } from "./rpc.ts"
 import type { QoderPricingOutput, QoderQuotaOutput, QoderStatsOutput } from "./rpc.ts"
@@ -20,6 +21,12 @@ interface CreditsPanelProps {
   onStatus: () => Promise<void> | void
 }
 
+type PanelLine = {
+  tone: "base" | "muted" | "warning"
+  text: string
+  action?: "toggle-pricing" | "refresh"
+}
+
 /**
  * 侧边栏常驻的 "Qoder Credits" 面板。
  *
@@ -28,59 +35,41 @@ interface CreditsPanelProps {
  */
 export function QoderCreditsPanel(props: CreditsPanelProps) {
   const theme = props.context.theme
-  const [stats, setStats] = createSignal<QoderStatsOutput | undefined>(undefined)
-  const [quota, setQuota] = createSignal<QoderQuotaOutput | undefined>(undefined)
-  const [pricing, setPricing] = createSignal<QoderPricingOutput>(null)
-  const [error, setError] = createSignal<string | undefined>(undefined)
-  const [quotaError, setQuotaError] = createSignal<string | undefined>(undefined)
-  const [nowMs, setNowMs] = createSignal(Date.now())
-
-  const fetchStats = async () => {
-    try {
-      const value = (await props.context.client.rpc(QoderRpc).stats({})) as QoderStatsOutput
-      setStats(value)
-      setError(undefined)
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
-    }
-  }
-  const fetchQuota = async () => {
-    try {
-      const value = (await props.context.client.rpc(QoderRpc).quota({ refresh: false })) as QoderQuotaOutput
-      setQuota(value)
-      setQuotaError(undefined)
-    } catch (cause) {
-      // 配额错误只降级面板，不用 toast 打断用户。
-      setQuotaError(cause instanceof Error ? cause.message : String(cause))
-    }
-  }
-  const fetchPricing = async () => {
-    try {
-      const value = (await props.context.client.rpc(QoderRpc).pricing({ refresh: false })) as QoderPricingOutput
-      setPricing(value ?? null)
-    } catch {
-      // 倍率不可用时保留上一次快照；从未取到数据则整段隐藏，不显示占位值。
-    }
-  }
-
-  const poller = createStatsPoller({
-    fetch: async () => {
-      await Promise.all([fetchStats(), fetchQuota(), fetchPricing()])
-      setNowMs(Date.now())
-    },
+  const controller = createCreditsPanelController({
+    fetchStats: async () =>
+      (await props.context.client.rpc(QoderRpc).stats({})) as QoderStatsOutput,
+    fetchQuota: async ({ refresh }) =>
+      (await props.context.client.rpc(QoderRpc).quota({ refresh })) as QoderQuotaOutput,
+    fetchPricing: async ({ refresh }) =>
+      (await props.context.client.rpc(QoderRpc).pricing({ refresh })) as QoderPricingOutput,
   })
+  const [state, setState] = createSignal(controller.getState())
+  const unsubscribe = controller.subscribe(() => setState(controller.getState()))
+  onCleanup(unsubscribe)
+
+  const poller = createStatsPoller({ fetch: () => controller.load() })
   poller.start()
   onCleanup(() => poller.stop())
 
-  const lines = createMemo(() => [
+  const activate = (action: string) => {
+    if (action === "toggle-pricing") controller.togglePricing()
+    else if (action === "refresh") void controller.refresh()
+  }
+
+  const lines = createMemo<PanelLine[]>(() => [
     ...creditsPanelLines({
-      stats: stats(),
-      quota: quota(),
-      error: error(),
-      quotaError: quotaError(),
-      nowMs: nowMs(),
+      stats: state().stats,
+      quota: state().quota,
+      error: state().error,
+      quotaError: state().quotaError,
+      nowMs: state().nowMs,
     }),
-    ...pricingPanelLines({ pricing: pricing(), nowMs: nowMs() }),
+    ...pricingPanelLines({
+      pricing: state().pricing,
+      nowMs: state().nowMs,
+      collapsed: state().collapsed,
+    }),
+    ...panelFooterLines({ refreshing: state().refreshing }),
   ])
 
   return (
@@ -92,8 +81,7 @@ export function QoderCreditsPanel(props: CreditsPanelProps) {
           if (event.button !== 0) return
           void (async () => {
             await props.onStatus()
-            await Promise.all([fetchQuota(), fetchPricing()])
-            setNowMs(Date.now())
+            await controller.reload()
           })()
         }}
       >
@@ -101,7 +89,16 @@ export function QoderCreditsPanel(props: CreditsPanelProps) {
       </text>
       <For each={lines()}>
         {(line, index) => (
-          <text id={`sidebar.qoder-credits.line.${index()}`} fg={toneColor(theme, line.tone)}>
+          <text
+            id={`sidebar.qoder-credits.line.${index()}`}
+            fg={toneColor(theme, line.tone)}
+            onMouseUp={(event) => {
+              if (!line.action) return
+              if (event.button !== 0) return
+              event.stopPropagation()
+              activate(line.action)
+            }}
+          >
             {line.text}
           </text>
         )}

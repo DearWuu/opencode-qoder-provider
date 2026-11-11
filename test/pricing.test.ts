@@ -190,12 +190,28 @@ test("the panel hides the whole pricing section when data is missing or empty", 
 test("the panel shows each model factor, the active countdown and the update time", () => {
   const lines = pricingPanelLines({ pricing: snapshot([activeModel(), { modelKey: "Auto", priceFactor: 1 }]), nowMs: ACTIVE_NOW_MS })
   assert.deepEqual(lines.slice(0, 3), [
-    { tone: "base", text: "模型倍率" },
+    { tone: "base", text: "模型倍率 ▾", action: "toggle-pricing" },
     { tone: "muted", text: "GLM-5.3 0.10x 低峰 · 30 分后恢复 0.50x" },
     { tone: "muted", text: "Auto 1.00x" },
   ])
   assert.equal(lines.length, 4)
   assert.match((lines[3] as any).text, /^\d{2}:\d{2} 更新$/)
+})
+
+test("the collapsed panel keeps one header line with the valid model count", () => {
+  const pricing = snapshot([
+    activeModel(),
+    { modelKey: "Auto", priceFactor: 1 },
+    { modelKey: "Bad", priceFactor: Number.NaN },
+    { modelKey: " ", priceFactor: 0.5 },
+  ])
+  assert.deepEqual(pricingPanelLines({ pricing, nowMs: ACTIVE_NOW_MS, collapsed: true }), [
+    { tone: "base", text: "模型倍率 ▸ 2", action: "toggle-pricing" },
+  ])
+  // 折叠不影响默认展开态：标题带 ▾ 与全部模型行。
+  assert.equal(pricingPanelLines({ pricing, nowMs: ACTIVE_NOW_MS })[0]!.text, "模型倍率 ▾")
+  // 无有效模型时即使折叠也整段隐藏。
+  assert.deepEqual(pricingPanelLines({ pricing: snapshot([]), collapsed: true }), [])
 })
 
 test("the panel renders the upcoming low-peak state with its badge", () => {

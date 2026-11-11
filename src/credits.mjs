@@ -71,6 +71,21 @@ export function creditsPanelLines(input) {
   return lines
 }
 
+/**
+ * 面板末尾固定的手动刷新行：空闲时 `⟳ 刷新`，刷新中 `刷新中…`。
+ *
+ * 该行始终存在（与是否有数据无关），`action: "refresh"` 由面板接线到
+ * quota+pricing 的强制刷新；Today 只读本地日志，不参与刷新。
+ *
+ * 调用方：panel.tsx（经 createMemo 渲染面板行）。
+ *
+ * @param {{ refreshing?: boolean }} [input]
+ * @returns {Array<{ tone: "muted", text: string, action: "refresh" }>}
+ */
+export function panelFooterLines(input = {}) {
+  return [{ tone: "muted", text: input.refreshing === true ? "刷新中…" : "⟳ 刷新", action: "refresh" }]
+}
+
 function daysUntil(expiresAt, nowMs) {
   const expiryMs = new Date(expiresAt).getTime()
   if (!Number.isFinite(expiryMs)) return 0
