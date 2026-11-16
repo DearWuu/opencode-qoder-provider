@@ -14,7 +14,7 @@ test("the execute method takes a text and returns a text", () => {
 
   assert.deepEqual(method.input, {
     type: "object",
-    properties: { text: { type: "string" } },
+    properties: { text: { type: "string" }, variant: { type: "string", enum: ["qodercn", "qoder"] } },
     required: ["text"],
     additionalProperties: false,
   })
@@ -31,7 +31,7 @@ test("the stats method takes no input and returns the stable panel fields", () =
 
   assert.deepEqual(method.input, {
     type: "object",
-    properties: {},
+    properties: { variant: { type: "string", enum: ["qodercn", "qoder"] } },
     required: [],
     additionalProperties: false,
   })
@@ -75,7 +75,7 @@ test("the quota method exposes real values plus source, cache and error metadata
   const method = QoderRpc.methods.quota as any
   assert.deepEqual(method.input, {
     type: "object",
-    properties: { refresh: { type: "boolean" } },
+    properties: { refresh: { type: "boolean" }, variant: { type: "string", enum: ["qodercn", "qoder"] } },
     required: [],
     additionalProperties: false,
   })
@@ -91,7 +91,7 @@ test("the pricing method returns the snapshot contract or null", () => {
   const method = QoderRpc.methods.pricing as any
   assert.deepEqual(method.input, {
     type: "object",
-    properties: { refresh: { type: "boolean" } },
+    properties: { refresh: { type: "boolean" }, variant: { type: "string", enum: ["qodercn", "qoder"] } },
     required: [],
     additionalProperties: false,
   })

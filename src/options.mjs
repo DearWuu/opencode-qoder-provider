@@ -1,17 +1,19 @@
 /**
- * 文件职责：provider 选项与环境变量的规范化（CLI 路径、权限模式、超时、上下文窗口、日志路径、工具清单、倍率缓存与抓取超时）及默认值。
+ * 文件职责：provider 选项与环境变量的规范化（变体、CLI 路径、权限模式、超时、上下文窗口、日志路径、工具清单、倍率缓存与抓取超时）及默认值。
  * 上游：index.ts、provider.mjs、src/provider、src/catalog、scripts/check-real-catalog.mjs。
- * 下游：node:fs/os/path/url、src/pricing（倍率 TTL 与抓取超时默认值）。
+ * 下游：node:fs/os/path/url、src/pricing（倍率 TTL 与抓取超时默认值）、src/variants（变体与 CLI 解析）。
  */
-import { existsSync } from "node:fs"
 import { homedir } from "node:os"
-import { dirname, join, resolve } from "node:path"
-import { fileURLToPath } from "node:url"
+import { join } from "node:path"
 
 import { PRICING_TIMEOUT_MS, PRICING_TTL_MS } from "./pricing.mjs"
+import { DEFAULT_VARIANT_ID, getVariant, resolveVariantCliPath } from "./variants.mjs"
 
-export const PROVIDER_ID = "qoder"
-export const PROVIDER_NAME = "Qoder (Credits)"
+/** 缺省变体（CN）的 provider ID；海外变体的 ID 见 src/variants。 */
+export const PROVIDER_ID = getVariant(DEFAULT_VARIANT_ID).id
+
+/** 缺省变体（CN）的 provider 显示名。 */
+export const PROVIDER_NAME = getVariant(DEFAULT_VARIANT_ID).name
 
 /**
  * 用户未配置时使用的权限模式：默认放开 Qoder CLI 内层权限，
@@ -47,8 +49,6 @@ export const CLI_STDIN_LIMIT_BYTES = 8388608
  */
 export const MAX_PROMPT_BYTES = 7 * 1024 * 1024
 
-const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
-
 /**
  * 默认 JSONL 调用日志位置，遵循 XDG_STATE_HOME。
  *
@@ -61,17 +61,6 @@ export function defaultLogFile(env = process.env) {
 }
 
 /**
- * 定位插件随依赖安装的 Qoder CLI（若有）。
- *
- * @param {string} [root]
- * @returns {string|undefined}
- */
-export function bundledCliPath(root = PACKAGE_ROOT) {
-  const candidate = join(root, "node_modules", "@qodercn-ai", "qoderclicn", "bundle", "qoderclicn.js")
-  return existsSync(candidate) ? candidate : undefined
-}
-
-/**
  * 把原始插件选项 / 环境变量规范化为 provider runtime 选项。
  *
  * 优先级：显式选项 > 环境变量 > 内置默认值。
@@ -80,14 +69,11 @@ export function bundledCliPath(root = PACKAGE_ROOT) {
  *
  * @param {Record<string, any>} [raw]
  * @param {Record<string, string | undefined>} [env]
- * @returns {{ cliPath: string, permissionMode: string, timeoutMs: number, idleTimeoutMs: number, contextLimit: number, pricingTtlMs: number, pricingTimeoutMs: number, logFile: string, cwd: string|undefined, additionalDirs: string[], cliTools: string[]|""|undefined }}
+ * @returns {{ variantId: string, cliPath: string, permissionMode: string, timeoutMs: number, idleTimeoutMs: number, contextLimit: number, pricingTtlMs: number, pricingTimeoutMs: number, logFile: string, cwd: string|undefined, additionalDirs: string[], cliTools: string[]|""|undefined }}
  */
 export function resolveOptions(raw = {}, env = process.env) {
-  const cliPath =
-    firstString(raw.cliPath) ??
-    firstString(env.QODER_CLI_PATH) ??
-    bundledCliPath() ??
-    "qoderclicn"
+  const variantId = getVariant(raw.variant ?? raw.variantId ?? DEFAULT_VARIANT_ID).id
+  const cliPath = resolveVariantCliPath(variantId, { raw, env })
 
   // 空白的环境变量值视同未设置（有些启动器会导出空串）；
   // 而 raw 选项里显式给出空值仍然是硬错误。
@@ -159,6 +145,7 @@ export function resolveOptions(raw = {}, env = process.env) {
   }
 
   return {
+    variantId,
     cliPath,
     permissionMode,
     timeoutMs,

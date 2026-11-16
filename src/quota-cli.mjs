@@ -103,7 +103,8 @@ async function readOfficialUsageWithPty(options) {
         return
       }
       // 缺字段的企业/个人套餐也应及时落为 unavailable，而不是无意义地等到总超时。
-      if (!settleTimer && compact.includes("QoderCNPlan:")) {
+      // 变体差异只在套餐名（CN 是 `QoderCNPlan:`，海外是 `QoderPlan:`），到期行两变体一致。
+      if (!settleTimer && compact.includes("PlanExpiresAt:")) {
         settleTimer = setTimeout(() => finish(), timing.settleDelayMs)
       }
     })

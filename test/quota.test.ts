@@ -46,11 +46,25 @@ test("missing expiry or credit fields returns unavailable rather than estimates"
   }
 })
 
-test("multiple official detail lines are never summed without an official total", () => {
-  const output = RECORDED.replace("PlanCreditsUsed:N/A", "PlanCreditsUsed:10/100")
-  const quota = parseOfficialQuota(output, { now: NOW })
-  assert.equal(quota.available, false)
-  assert.equal(quota.total, 0)
+test("several official quotas are never summed: the highest priority label wins", () => {
+  // 真实屏（2026-11-16 取证）：海外 Teams 同时给出 PlanCreditsUsed:4/570 与 OrgResourcePackage:0/5000。
+  const output = RECORDED.replace("PlanCreditsUsed:N/A", "PlanCreditsUsed:4/570")
+
+  const intl = parseOfficialQuota(output, {
+    now: NOW,
+    labels: ["PlanCreditsUsed", "OrgResourcePackage", "Add-onCreditsUsed"],
+  })
+  assert.equal(intl.available, true)
+  assert.equal(intl.used, 4)
+  assert.equal(intl.total, 570)
+  assert.equal(intl.remaining, 566)
+
+  const cn = parseOfficialQuota(output, { now: NOW })
+  assert.equal(cn.available, true)
+  assert.equal(cn.used, 6872)
+  assert.equal(cn.total, 10000)
+  // 绝不把两个额度相加。
+  assert.notEqual(cn.total, 10570)
 })
 
 test("inconsistent credit values return unavailable", () => {
@@ -115,6 +129,20 @@ test("quota helper failures become unavailable results and are cached without th
   assert.equal(calls, 1)
   const status = formatQuotaStatus(quota)
   assert.match(status, /Quota: unavailable — pty unavailable/)
-  assert.match(status, /Quota source: Qoder CLI \/usage/)
+  assert.match(status, /Quota source: QoderCN CLI \/usage/)
   store.dispose()
+})
+
+test("each variant labels the official source with its own CLI", async () => {
+  const stores = [
+    createQuotaStore({ cliPath: "fake-qoder", variantId: "qodercn", now: () => NOW.getTime(), readUsage: async () => RECORDED }),
+    createQuotaStore({ cliPath: "fake-qoder", variantId: "qoder", now: () => NOW.getTime(), readUsage: async () => RECORDED }),
+  ]
+  const [cn, intl] = await Promise.all(stores.map((store) => store.read()))
+
+  assert.equal(cn.source, "QoderCN CLI /usage")
+  assert.equal(intl.source, "Qoder CLI /usage")
+  assert.equal(cn.available, true)
+  assert.equal(intl.available, true)
+  for (const store of stores) store.dispose()
 })

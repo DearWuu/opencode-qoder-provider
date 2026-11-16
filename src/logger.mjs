@@ -38,7 +38,12 @@ export function appendCallLog(file, entry) {
 /**
  * 为单次 Qoder 调用构建 JSONL 记录。
  *
+ * `variant` 与 `provider` 都记变体 ID（`qodercn` / `qoder`）：
+ * 0.2.x 的旧记录只有 `provider` 且当时只有 CN 变体，`entryVariant` 会把这类记录归回 CN。
+ *
  * @param {object} entry
+ * @param {string} [entry.variant] 变体 ID（`qodercn` / `qoder`）。
+ * @param {string} [entry.provider] provider ID，缺省用变体 ID。
  * @param {string} entry.requestedModel
  * @param {string} [entry.actualModel]
  * @param {string} [entry.usageModelKey]
@@ -61,13 +66,14 @@ export function appendCallLog(file, entry) {
  * @returns {Record<string, any>}
  */
 export function buildLogEntry({
-  requestedModel, actualModel, usageModelKey, usageModelKeys, credits, durationMs, isError, exitCode,
+  variant, provider, requestedModel, actualModel, usageModelKey, usageModelKeys, credits, durationMs, isError, exitCode,
   sessionId, timedOut, aborted, modelFallback, timeoutKind, lastEventType, lastEventAgoMs,
   sawStdout, sawStderr, sawTextDelta, sawResult,
 }) {
   const entry = {
     ts: new Date().toISOString(),
-    provider: "qoder",
+    variant,
+    provider: provider ?? variant ?? "qodercn",
     model: requestedModel,
     actualModel,
     modelFallback,
@@ -123,6 +129,27 @@ export function readCallLog(file, limit = 5) {
     }
   }
   return entries.slice(-limit)
+}
+
+/**
+ * 判断一条调用日志属于哪个变体。
+ *
+ * 优先看显式的 `variant` 字段；0.2.x 的旧记录没有该字段，且当时只有 CN 变体，
+ * 因此 `provider === "qoder"` 的旧记录归回 CN（`qodercn`）。
+ * 完全没有归属信息的记录按缺省变体（CN）计入。
+ *
+ * 调用方：src/stats 按变体聚合 Today/累计消耗、src/command 的 status 文案。
+ *
+ * @param {Record<string, any>} entry
+ * @param {string} [fallback] 无归属信息时的缺省变体
+ * @returns {string}
+ */
+export function entryVariant(entry, fallback = "qodercn") {
+  const explicit = entry?.variant
+  if (typeof explicit === "string" && explicit.trim().length > 0) return explicit.trim()
+  const provider = typeof entry?.provider === "string" ? entry.provider.trim() : ""
+  if (!provider) return fallback
+  return provider === "qoder" ? "qodercn" : provider
 }
 
 /**

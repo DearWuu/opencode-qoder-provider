@@ -1,13 +1,14 @@
 /**
- * 文件职责：OpenCode TUI 插件入口：注册 `/qoder` slash 命令与侧边栏 Credits 面板。
+ * 文件职责：OpenCode TUI 插件入口：注册 `/qoder` slash 命令与侧边栏 Credits 面板（CN + 海外两段）。
  * 上游：OpenCode TUI 加载器调用 QoderTuiPlugin.setup。
- * 下游：panel.tsx、src/command.parseSubcommand、rpc.ts。
+ * 下游：panel.tsx、src/command.parseSubcommand、src/variants.variantCommandToken、rpc.ts。
  */
 import { Plugin } from "@opencode/plugin/tui"
 import type { Context } from "@opencode/plugin/tui/context"
 
 import { QoderCreditsPanel } from "./panel.tsx"
 import { parseSubcommand } from "./src/command.mjs"
+import { variantCommandToken } from "./src/variants.mjs"
 import { QoderRpc } from "./rpc.ts"
 import type { QoderExecuteOutput } from "./rpc.ts"
 
@@ -29,7 +30,7 @@ export const QoderTuiPlugin = Plugin.define({
         {
           id: "qoder.command",
           title: "Qoder provider",
-          description: "Qoder provider status, model refresh, catalog and login help",
+          description: "Qoder provider status, model refresh, catalog and login help (CN and overseas variants)",
           group: "Qoder",
           palette: true,
           slash: { name: "qoder", arguments: true },
@@ -45,7 +46,7 @@ export const QoderTuiPlugin = Plugin.define({
       render: () =>
         QoderCreditsPanel({
           context,
-          onStatus: () => runQoderCommand(context, "status"),
+          onStatus: (variantId) => runQoderCommand(context, `${variantCommandToken(variantId)} status`),
         }),
     })
   },

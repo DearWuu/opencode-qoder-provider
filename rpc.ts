@@ -10,11 +10,24 @@ import { Rpc } from "@opencode/plugin/rpc"
  */
 export const QODER_RPC_ID = "qoder"
 
+/** 变体枚举：CN（`qodercn`）与海外（`qoder`）；缺省 CN。 */
+export const QODER_VARIANTS = ["qodercn", "qoder"] as const
+
+/** RPC 入参里的变体字段类型。 */
+export type QoderVariant = (typeof QODER_VARIANTS)[number]
+
+/** 变体字段的 JSON schema 片段（可选字段，缺省 CN）。 */
+const variantInput = {
+  variant: { type: "string", enum: [...QODER_VARIANTS] },
+} as const
+
 /**
  * 服务端（实现方法）与 TUI 侧（调用方法）之间的类型化契约。
  *
  * `stats` 只聚合本地日志；`quota` 通过官方 CLI `/usage` 低频读取账户额度。
  * 两者都不运行模型；插件自身不直接访问账户 HTTP API。
+ *
+ * 每个方法都接受可选的 `variant`：`qodercn`（CN）或 `qoder`（海外），缺省 `qodercn`。
  */
 export const QoderRpc = Rpc.define({
   id: QODER_RPC_ID,
@@ -22,7 +35,7 @@ export const QoderRpc = Rpc.define({
     execute: {
       input: {
         type: "object",
-        properties: { text: { type: "string" } },
+        properties: { text: { type: "string" }, ...variantInput },
         required: ["text"],
         additionalProperties: false,
       },
@@ -36,7 +49,7 @@ export const QoderRpc = Rpc.define({
     stats: {
       input: {
         type: "object",
-        properties: {},
+        properties: { ...variantInput },
         required: [],
         additionalProperties: false,
       },
@@ -78,7 +91,7 @@ export const QoderRpc = Rpc.define({
     quota: {
       input: {
         type: "object",
-        properties: { refresh: { type: "boolean" } },
+        properties: { refresh: { type: "boolean" }, ...variantInput },
         required: [],
         additionalProperties: false,
       },
@@ -114,7 +127,7 @@ export const QoderRpc = Rpc.define({
     pricing: {
       input: {
         type: "object",
-        properties: { refresh: { type: "boolean" } },
+        properties: { refresh: { type: "boolean" }, ...variantInput },
         required: [],
         additionalProperties: false,
       },
@@ -170,6 +183,8 @@ export const QoderRpc = Rpc.define({
 /** `execute` 方法的入参。 */
 export interface QoderExecuteInput {
   text: string
+  /** 变体：`qodercn`（CN）或 `qoder`（海外）；缺省 CN。文本里的变体 token 优先。 */
+  variant?: QoderVariant
 }
 
 /** `execute` 方法的返回值。 */

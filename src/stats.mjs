@@ -1,15 +1,18 @@
 /**
- * 文件职责：把本地调用日志聚合成侧边栏面板的稳定数据集（total/today/last）。
+ * 文件职责：把本地调用日志聚合成侧边栏面板的稳定数据集（total/today/last），按变体分账。
  * 上游：index.ts 的 stats RPC。
- * 下游：src/logger.sumCredits。
+ * 下游：src/logger.sumCredits、src/logger.entryVariant。
  */
-import { sumCredits } from "./logger.mjs"
+import { entryVariant, sumCredits } from "./logger.mjs"
 
 /**
  * 把本地调用日志聚合成侧边栏面板的稳定数据集。
  *
  * 纯函数：调用方传入从 JSONL 日志读出的条目与可注入时钟，因此不涉及模型调用或网络访问。
  * "今天"指 `now` 所在的本机日历日。
+ *
+ * 只统计属于本变体的记录：CN（`qodercn`）与海外（`qoder`）各自独立，
+ * 0.2.x 之前的旧记录（只有 `provider: "qoder"`）归 CN。
  *
  * 每个字段恒存在且非 null：缺失值表现为 `""` 或 `0`，让 RPC 输出 schema 保持简单可校验。
  *
@@ -20,25 +23,26 @@ import { sumCredits } from "./logger.mjs"
 export function computeQoderStats(entries, info) {
   const now = info.now ?? new Date()
   const todayKey = localDayKey(now)
+  const variantEntries = entries.filter((entry) => entryVariant(entry) === info.provider)
 
   let todayCalls = 0
   let todayCredits = 0
-  for (const entry of entries) {
+  for (const entry of variantEntries) {
     const entryKey = typeof entry?.ts === "string" ? localDayKey(new Date(entry.ts)) : null
     if (entryKey === null || entryKey !== todayKey) continue
     todayCalls += 1
     if (typeof entry.credits === "number" && Number.isFinite(entry.credits)) todayCredits += entry.credits
   }
 
-  const last = entries.length > 0 ? entries[entries.length - 1] : undefined
+  const last = variantEntries.length > 0 ? variantEntries[variantEntries.length - 1] : undefined
   return {
     provider: info.provider,
     models: info.models,
     authenticated: info.authenticated,
     permissionMode: info.permissionMode,
     cliVersion: typeof info.cliVersion === "string" ? info.cliVersion : "",
-    totalCalls: entries.length,
-    totalCredits: sumCredits(entries),
+    totalCalls: variantEntries.length,
+    totalCredits: sumCredits(variantEntries),
     todayCalls,
     todayCredits,
     lastModel: typeof last?.model === "string" ? last.model : "",
@@ -57,7 +61,7 @@ export function computeQoderStats(entries, info) {
 function localDayKey(date) {
   if (Number.isNaN(date.getTime())) return null
   const year = `${date.getFullYear()}`.padStart(4, "0")
-  const month = `${date.getMonth() + 1}`.padStart(2, "0")
+  const month = `${(date.getMonth() + 1)}`.padStart(2, "0")
   const day = `${date.getDate()}`.padStart(2, "0")
   return `${year}-${month}-${day}`
 }

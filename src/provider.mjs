@@ -8,7 +8,7 @@ import { appendCallLog, buildLogEntry } from "./logger.mjs"
 import { assertPromptSize, serializePrompt } from "./prompt.mjs"
 import { ModelFallbackError, buildGenerateResult, detectFallback, summarizeModelUsage } from "./result.mjs"
 import { createStreamJsonParser } from "./stream.mjs"
-import { PROVIDER_ID, resolveOptions } from "./options.mjs"
+import { resolveOptions } from "./options.mjs"
 
 /**
  * 创建 Qoder AI SDK provider。
@@ -16,10 +16,13 @@ import { PROVIDER_ID, resolveOptions } from "./options.mjs"
  * 返回对象实现 OpenCode 使用的 AI SDK provider 协议：
  * `languageModel(modelID)` 返回一个驱动 Qoder CLI 的 LanguageModelV3。
  *
+ * 每个变体（CN / 海外）各自创建一份：provider ID、CLI 路径与日志归属都随变体走。
+ *
  * 调用方：index.ts 的 setup（经 provider.mjs 再导出给 OpenCode）。
  *
  * @param {object} [options]
- * @param {string} [options.cliPath] `qoderclicn` 路径（默认：随包 CLI → `QODER_CLI_PATH` → `PATH`）。
+ * @param {string} [options.variant] 变体 ID（`qodercn` / `qoder`），缺省 CN。
+ * @param {string} [options.cliPath] 该变体的 CLI 路径（默认按变体解析）。
  * @param {string} [options.permissionMode] Qoder CLI 权限模式（默认 `bypass_permissions`，风险自担）。
  * @param {number} [options.timeoutMs] 单次调用总超时（默认 30 分钟）。
  * @param {number} [options.idleTimeoutMs] stdout/stderr 无活动超时（默认 180000 毫秒）。
@@ -34,7 +37,7 @@ export function createQoder(options = {}) {
   const resolved = resolveOptions(options)
   return {
     specificationVersion: "v3",
-    provider: PROVIDER_ID,
+    provider: resolved.variantId,
     languageModel(modelID) {
       return createLanguageModel(modelID, resolved)
     },
@@ -54,7 +57,7 @@ export function createQoder(options = {}) {
 export function createLanguageModel(modelID, resolved) {
   return {
     specificationVersion: "v3",
-    provider: PROVIDER_ID,
+    provider: resolved.variantId,
     modelId: modelID,
     supportedUrls: {},
     async doGenerate(callOptions = {}) {
@@ -269,7 +272,7 @@ async function execute({ modelID, resolved, prompt, signal, parser, maxOutputTok
 }
 
 function logCall(resolved, entry) {
-  appendCallLog(resolved.logFile, buildLogEntry(entry))
+  appendCallLog(resolved.logFile, buildLogEntry({ variant: resolved.variantId, provider: resolved.variantId, ...entry }))
 }
 
 function cliFailure(run, cause) {

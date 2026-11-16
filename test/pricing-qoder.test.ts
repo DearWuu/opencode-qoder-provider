@@ -15,6 +15,7 @@ import {
   buildNodeOptions,
   extractPricing,
   parsePricingCaptures,
+  pricingSourceLabel,
 } from "../src/pricing-qoder.mjs"
 
 const FAKE_CLI = fileURLToPath(new URL("./fixtures/fake-qoder.mjs", import.meta.url))
@@ -48,6 +49,13 @@ test("buildNodeOptions appends the capture hook without dropping existing option
     buildNodeOptions("  --no-warnings  ", "file:///hook.mjs"),
     "--no-warnings --import=file:///hook.mjs",
   )
+})
+
+test("the pricing source names the CLI that was actually used", () => {
+  assert.equal(pricingSourceLabel("qoderclicn"), "qoderclicn --list-models + JSON.parse capture hook (catalog plaintext)")
+  assert.equal(pricingSourceLabel("/root/.nvm/bin/qodercli"), "qodercli --list-models + JSON.parse capture hook (catalog plaintext)")
+  assert.equal(pricingSourceLabel("/plugin/bundle/qoderclicn.js"), "qoderclicn --list-models + JSON.parse capture hook (catalog plaintext)")
+  assert.equal(pricingSourceLabel(""), PRICING_SOURCE)
 })
 
 test("parsePricingCaptures maps the plaintext catalog into the pricing contract", () => {

@@ -1,30 +1,63 @@
 /**
- * 文件职责：`/qoder` 子命令解析，以及 status/models/login/usage 文案的纯拼装。
- * 上游：index.ts 的 `/qoder` 命令与 RPC execute、tui.ts 的 parseSubcommand。
- * 下游：src/logger（读调用日志、累加 Credits）、src/options（provider 名称）、src/pricing（倍率与促销态文案）。
+ * 文件职责：`/qoder` 子命令与变体 token 的解析，以及 status/models/login/usage 文案的纯拼装。
+ * 上游：index.ts 的 `/qoder` 命令与 RPC execute、tui.ts 的 parseCommand。
+ * 下游：src/logger（读调用日志、累加 Credits）、src/variants（变体描述符）、src/pricing（倍率与促销态文案）。
  */
-import { readCallLog, sumCredits } from "./logger.mjs"
-import { PROVIDER_ID, PROVIDER_NAME } from "./options.mjs"
+import { entryVariant, readCallLog, sumCredits } from "./logger.mjs"
+import { DEFAULT_VARIANT_ID, getVariant, variantFromToken, variantModelReference } from "./variants.mjs"
 import { modelPricingLine, pricingStatusLine } from "./pricing.mjs"
 
 /**
- * 从一次 `/qoder ...` 调用里解析出子命令。
+ * 解析一次 `/qoder ...` 调用：变体 + 子命令。
  *
- * 同时接受原始 prompt 文本（"/qoder refresh"）和裸子命令（"refresh"），
- * 让 TUI 与服务端命令共用同一个解析器。
+ * 变体 token 可写 `cn` / `qodercn`（CN 变体）或 `intl` / `qoder` / `global`（海外变体）；
+ * 缺省是 CN（向后兼容旧行为）。token 放在子命令前后都认：
+ * `/qoder intl models` 与 `/qoder models intl` 等价。
+ *
+ * `explicit` 表示文本里是否真的写了变体 token：写了就以文本为准，
+ * 没写才允许调用方（RPC 入参）指定变体。
  *
  * 调用方：index.ts 的 executeQoderCommand、tui.ts 的 runQoderCommand。
+ *
+ * @param {string} text
+ * @returns {{ variantId: string, subcommand: string, explicit: boolean }}
+ */
+export function parseCommand(text) {
+  const tokens = String(text ?? "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part.replace(/^\/+/, "").toLowerCase())
+
+  // 命令名本身（"/qoder"）不是变体 token。
+  const rest = tokens[0] === "qoder" ? tokens.slice(1) : tokens
+
+  let variantId = DEFAULT_VARIANT_ID
+  let explicit = false
+  let args = rest
+  if (args.length > 0 && variantFromToken(args[0])) {
+    variantId = variantFromToken(args[0])
+    explicit = true
+    args = args.slice(1)
+  } else if (args.length > 1 && variantFromToken(args[args.length - 1])) {
+    variantId = variantFromToken(args[args.length - 1])
+    explicit = true
+    args = args.slice(0, -1)
+  }
+
+  return { variantId, subcommand: args[0] ?? "status", explicit }
+}
+
+/**
+ * 从一次 `/qoder ...` 调用里解析出子命令（不含变体 token）。
+ *
+ * 调用方：tui.ts 判断是否为 refresh。
  *
  * @param {string} text
  * @returns {string} 子命令；没有给参数时为 "status"
  */
 export function parseSubcommand(text) {
-  const parts = (text ?? "").trim().split(/\s+/).filter(Boolean)
-  if (parts.length === 0) return "status"
-  const first = (parts[0] ?? "").replace(/^\/+/, "").toLowerCase()
-  if (first !== "qoder") return first
-  const second = (parts[1] ?? "").replace(/^\/+/, "").toLowerCase()
-  return second.length > 0 ? second : "status"
+  return parseCommand(text).subcommand
 }
 
 /**
@@ -32,10 +65,11 @@ export function parseSubcommand(text) {
  *
  * @param {Array<{ id: string }>} catalog
  * @param {number} [limit]
+ * @param {string} [variantId]
  * @returns {string}
  */
-export function preview(catalog, limit = 6) {
-  const shown = catalog.slice(0, limit).map((entry) => `${PROVIDER_ID}/${entry.id}`)
+export function preview(catalog, limit = 6, variantId = DEFAULT_VARIANT_ID) {
+  const shown = catalog.slice(0, limit).map((entry) => variantModelReference(variantId, entry.id))
   if (catalog.length > limit) shown.push("…")
   return shown.join(", ")
 }
@@ -45,7 +79,7 @@ export function preview(catalog, limit = 6) {
  *
  * 只读本地调用日志：不跑模型，也不联网。
  *
- * @param {{ cliPath: string, permissionMode: string, timeoutMs: number, idleTimeoutMs: number, logFile: string, cwd?: string }} options
+ * @param {{ variantId?: string, cliPath: string, permissionMode: string, timeoutMs: number, idleTimeoutMs: number, logFile: string, cwd?: string }} options
  * @param {Array<{ id: string, modelID: string, name: string }>} catalog
  * @param {string|undefined} discoveryError
  * @param {string|undefined} cliVersion
@@ -54,21 +88,22 @@ export function preview(catalog, limit = 6) {
  * @returns {string}
  */
 export function buildStatusText(options, catalog, discoveryError, cliVersion, pricing, nowMs = Date.now()) {
-  const lines = [`Qoder provider status (${PROVIDER_ID} / ${PROVIDER_NAME})`]
+  const variant = getVariant(options.variantId ?? DEFAULT_VARIANT_ID)
+  const lines = [`${variant.name} provider status (${variant.id})`]
   lines.push(`- CLI: ${options.cliPath}${cliVersion ? ` (${cliVersion})` : ""}`)
   lines.push(
     discoveryError
       ? `- Auth: unavailable — ${discoveryError}`
       : `- Auth: ok (${catalog.length} models discovered)`,
   )
-  lines.push(`- Models: ${catalog.length} (${preview(catalog)})`)
+  lines.push(`- Models: ${catalog.length} (${preview(catalog, 6, variant.id)})`)
   lines.push(`- Permission mode: ${options.permissionMode}`)
   lines.push(`- Total timeout: ${options.timeoutMs} ms`)
   lines.push(`- Idle timeout: ${options.idleTimeoutMs} ms (stdout/stderr activity resets it)`)
   lines.push(`- Working directory: ${options.cwd ?? "(inherited)"}`)
   lines.push(`- Log: ${options.logFile}`)
 
-  const entries = readCallLog(options.logFile, 100_000)
+  const entries = readCallLog(options.logFile, 100_000).filter((entry) => entryVariant(entry) === variant.id)
   if (entries.length > 0) {
     const last = entries[entries.length - 1]
     lines.push(
@@ -93,10 +128,12 @@ export function buildStatusText(options, catalog, discoveryError, cliVersion, pr
  * @param {string|undefined} discoveryError
  * @param {Record<string, any>|null|undefined} [pricing] 每模型倍率快照
  * @param {number} [nowMs] 倒计时基准时间
+ * @param {string} [variantId]
  * @returns {string}
  */
-export function buildModelsText(catalog, discoveryError, pricing, nowMs = Date.now()) {
-  const lines = [`Qoder models (${catalog.length})`]
+export function buildModelsText(catalog, discoveryError, pricing, nowMs = Date.now(), variantId = DEFAULT_VARIANT_ID) {
+  const variant = getVariant(variantId)
+  const lines = [`${variant.name} models (${catalog.length})`]
   if (discoveryError) {
     lines.push(`Discovery failed: ${discoveryError}`)
     lines.push("Showing the placeholder catalog; run `/qoder login` and `/qoder refresh` after authenticating.")
@@ -109,7 +146,7 @@ export function buildModelsText(catalog, discoveryError, pricing, nowMs = Date.n
   for (const entry of catalog) {
     const pricingText = modelPricingLine(byModelKey.get(entry.modelID), nowMs)
     const suffix = pricingText ? `  ${pricingText}` : ""
-    lines.push(`- ${PROVIDER_ID}/${entry.id.padEnd(width)}  ${entry.name}${suffix}`)
+    lines.push(`- ${variantModelReference(variant.id, entry.id.padEnd(width))}  ${entry.name}${suffix}`)
   }
   return lines.join("\n")
 }
@@ -118,17 +155,19 @@ export function buildModelsText(catalog, discoveryError, pricing, nowMs = Date.n
  * 拼出 `/qoder login` 文案。插件从不代跑交互式登录，只打印指引。
  *
  * @param {string} cliPath
+ * @param {string} [variantId]
  * @returns {string}
  */
-export function buildLoginText(cliPath) {
+export function buildLoginText(cliPath, variantId = DEFAULT_VARIANT_ID) {
+  const variant = getVariant(variantId)
   return [
-    "Authenticate the Qoder CLI (this plugin never runs the interactive login for you):",
+    `Authenticate the ${variant.label} CLI (this plugin never runs the interactive login for you):`,
     "",
     "1. Open a terminal.",
     `2. Run: ${cliPath} login`,
     "3. Complete the login shown by the CLI.",
     "",
-    "Afterwards run `/qoder refresh` to reload the model catalog and `/qoder status` to verify.",
+    `Afterwards run \`/qoder ${variant.commandTokens[0]} refresh\` to reload the model catalog and \`/qoder ${variant.commandTokens[0]} status\` to verify.`,
   ].join("\n")
 }
 
@@ -139,11 +178,16 @@ export function buildLoginText(cliPath) {
  */
 export function buildUsageText() {
   return [
-    "Usage: /qoder <command>",
+    "Usage: /qoder [variant] <command>",
     "",
+    "Variants:",
+    "- cn | qodercn   QoderCN (Credits), CLI qoderclicn (default)",
+    "- intl | qoder  Qoder (Credits), overseas CLI qodercli",
+    "",
+    "Commands:",
     "- status   CLI path, authentication, model count, last call and credits (default)",
     "- refresh  re-discover the models and reload the provider",
-    "- models   list the selectable qoder/* model IDs",
-    "- login    show how to authenticate the Qoder CLI",
+    "- models   list the selectable model IDs of the variant",
+    "- login    show how to authenticate the variant's CLI",
   ].join("\n")
 }

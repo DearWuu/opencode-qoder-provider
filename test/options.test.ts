@@ -17,6 +17,24 @@ test("resolveOptions rejects an invalid permissionMode instead of falling back",
   assert.throws(() => resolveOptions({}, { QODER_PERMISSION_MODE: "nope" }), /Invalid permissionMode "nope"/)
 })
 
+test("resolveOptions carries the variant and resolves its own CLI path", () => {
+  // 缺省变体是 CN。
+  assert.equal(resolveOptions({}, {}).variantId, "qodercn")
+
+  const cn = resolveOptions({ cliPath: "/legacy/qoderclicn" }, {})
+  assert.equal(cn.variantId, "qodercn")
+  assert.equal(cn.cliPath, "/legacy/qoderclicn")
+
+  const intl = resolveOptions({
+    variant: "qoder",
+    variants: { qoder: { cliPath: "/opt/qodercli" } },
+  }, {})
+  assert.equal(intl.variantId, "qoder")
+  assert.equal(intl.cliPath, "/opt/qodercli")
+
+  assert.throws(() => resolveOptions({ variant: "nope" }, {}), /Unknown Qoder variant/)
+})
+
 test("a blank QODER_PERMISSION_MODE env value counts as unset", () => {
   assert.equal(resolveOptions({}, { QODER_PERMISSION_MODE: "" }).permissionMode, DEFAULT_PERMISSION_MODE)
   assert.equal(resolveOptions({}, { QODER_PERMISSION_MODE: "   " }).permissionMode, DEFAULT_PERMISSION_MODE)

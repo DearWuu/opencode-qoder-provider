@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 
 import { computeQoderStats } from "../src/stats.mjs"
 
-const INFO = { provider: "qoder", models: 12, authenticated: true, permissionMode: "default", cliVersion: "1.1.85" }
+const INFO = { provider: "qodercn", models: 12, authenticated: true, permissionMode: "default", cliVersion: "1.1.85" }
 
 /** 固定本机日历日的正午，让 "today" 在任何时区都成立。 */
 function dayAt(now: Date, offsetDays: number, hour = 12): string {
@@ -65,9 +65,9 @@ test("reports the last entry for the last-call fields", () => {
 })
 
 test("an empty log yields zeros, not nulls", () => {
-  const stats = computeQoderStats([], { provider: "qoder", models: 0, authenticated: false, permissionMode: "default" })
+  const stats = computeQoderStats([], { provider: "qodercn", models: 0, authenticated: false, permissionMode: "default" })
   assert.deepEqual(stats, {
-    provider: "qoder",
+    provider: "qodercn",
     models: 0,
     authenticated: false,
     permissionMode: "default",
@@ -81,6 +81,26 @@ test("an empty log yields zeros, not nulls", () => {
     lastAt: "",
     lastError: false,
   })
+})
+
+test("the two variants never mix their calls or credits", () => {
+  const entries = [
+    { ts: dayAt(NOW, 0), variant: "qodercn", provider: "qodercn", model: "auto", credits: 1 },
+    { ts: dayAt(NOW, 0), variant: "qoder", provider: "qoder", model: "ultimate", credits: 2 },
+    // 0.2.x 的旧记录：只有 provider 字段，当时只有 CN 变体。
+    { ts: dayAt(NOW, 0), provider: "qoder", model: "old", credits: 3 },
+  ]
+  const cn = computeQoderStats(entries, { ...INFO, now: NOW })
+  const intl = computeQoderStats(entries, { ...INFO, provider: "qoder", now: NOW })
+
+  assert.equal(cn.totalCalls, 2)
+  assert.equal(cn.totalCredits, 4)
+  assert.equal(cn.todayCredits, 4)
+  assert.equal(cn.lastModel, "old")
+  assert.equal(intl.totalCalls, 1)
+  assert.equal(intl.totalCredits, 2)
+  assert.equal(intl.todayCredits, 2)
+  assert.equal(intl.lastModel, "ultimate")
 })
 
 test("the last entry without model or credits still reports empty strings", () => {

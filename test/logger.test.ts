@@ -13,6 +13,7 @@ function tempFile() {
 
 test("buildLogEntry keeps only metadata, never the prompt", () => {
   const entry = buildLogEntry({
+    variant: "qodercn",
     requestedModel: "Auto",
     actualModel: "Auto",
     modelFallback: false,
@@ -25,7 +26,8 @@ test("buildLogEntry keeps only metadata, never the prompt", () => {
     sessionId: "session-1",
   })
 
-  assert.equal(entry.provider, "qoder")
+  assert.equal(entry.provider, "qodercn")
+  assert.equal(entry.variant, "qodercn")
   assert.equal(entry.model, "Auto")
   assert.equal(entry.credits, 0.25)
   assert.equal(entry.actualModel, "Auto")
@@ -35,6 +37,17 @@ test("buildLogEntry keeps only metadata, never the prompt", () => {
   assert.equal("prompt" in entry, false)
   assert.equal("auth" in entry, false)
   assert.equal("token" in entry, false)
+})
+
+test("buildLogEntry records the overseas variant as its own provider", () => {
+  const entry = buildLogEntry({
+    variant: "qoder",
+    requestedModel: "Ultimate",
+    credits: 1,
+  })
+
+  assert.equal(entry.provider, "qoder")
+  assert.equal(entry.variant, "qoder")
 })
 
 test("buildLogEntry carries only non-sensitive lifecycle diagnostics", () => {

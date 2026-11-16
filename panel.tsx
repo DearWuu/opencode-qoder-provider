@@ -1,8 +1,10 @@
 /** @jsxImportSource @opentui/solid */
 /**
- * 文件职责：TUI 侧边栏 Qoder Credits 面板（@opentui/solid 组件），展示本地 Today、官方 `/usage` 额度与每模型倍率。
+ * 文件职责：TUI 侧边栏的 Qoder Credits 面板（@opentui/solid 组件）：CN 与海外两个变体各一段，
+ * 展示本地 Today、官方 `/usage` 额度与每模型倍率。
  * 上游：tui.ts 挂载到 sidebar.content slot。
- * 下游：src/credits.creditsPanelLines、src/pricing.pricingPanelLines、src/poller.createStatsPoller、rpc.ts（stats/quota/pricing）。
+ * 下游：src/credits.creditsPanelLines、src/pricing.pricingPanelLines、src/panel-model.createCreditsPanelController、
+ *       src/poller.createStatsPoller、rpc.ts（stats/quota/pricing）、src/variants（变体清单）。
  */
 import { For, createMemo, createSignal, onCleanup } from "solid-js"
 
@@ -12,13 +14,14 @@ import { creditsPanelLines, panelFooterLines } from "./src/credits.mjs"
 import { pricingPanelLines } from "./src/pricing.mjs"
 import { createCreditsPanelController } from "./src/panel-model.mjs"
 import { createStatsPoller } from "./src/poller.mjs"
+import { VARIANT_IDS, getVariant } from "./src/variants.mjs"
 import { QoderRpc } from "./rpc.ts"
 import type { QoderPricingOutput, QoderQuotaOutput, QoderStatsOutput } from "./rpc.ts"
 
 interface CreditsPanelProps {
   context: Context
-  /** 打开完整的 `/qoder status` 对话框；由 TUI 插件接线。 */
-  onStatus: () => Promise<void> | void
+  /** 打开对应变体的完整 `/qoder <variant> status` 对话框；由 TUI 插件接线。 */
+  onStatus: (variantId: string) => Promise<void> | void
 }
 
 type PanelLine = {
@@ -28,20 +31,69 @@ type PanelLine = {
 }
 
 /**
- * 侧边栏常驻的 "Qoder Credits" 面板。
+ * 侧边栏常驻的 "Qoder Credits" 面板（CN + 海外两段）。
  *
  * Today 每 15 秒只读本地日志。quota 与 pricing RPC 命中服务端内存缓存，
  * 只有挂载、TTL 到期或用户主动 status/refresh 才读取外部来源，不产生模型调用。
  */
 export function QoderCreditsPanel(props: CreditsPanelProps) {
   const theme = props.context.theme
+  const sections = VARIANT_IDS.map((variantId) => createVariantSection(props, variantId))
+
+  return (
+    <box id="sidebar.qoder-credits" flexDirection="column" gap={0}>
+      <For each={sections}>
+        {(section, index) => (
+          <>
+            <text
+              id={`sidebar.qoder-credits.${section.id}.title`}
+              fg={theme.text.base}
+              onMouseUp={(event) => {
+                if (event.button !== 0) return
+                void props.onStatus(section.id)
+              }}
+            >
+              <b>{section.name}</b>
+            </text>
+            <For each={section.lines()}>
+              {(line, lineIndex) => (
+                <text
+                  id={`sidebar.qoder-credits.${section.id}.line.${lineIndex()}`}
+                  fg={toneColor(theme, line.tone)}
+                  onMouseUp={(event) => {
+                    if (!line.action) return
+                    if (event.button !== 0) return
+                    event.stopPropagation()
+                    section.activate(line.action)
+                  }}
+                >
+                  {line.text}
+                </text>
+              )}
+            </For>
+            {index() < sections.length - 1 ? <text id={`sidebar.qoder-credits.${section.id}.gap`}> </text> : null}
+          </>
+        )}
+      </For>
+    </box>
+  )
+}
+
+/**
+ * 一个变体对应的面板小节：独立的状态控制器、轮询与面板行。
+ *
+ * @param {CreditsPanelProps} props
+ * @param {string} variantId
+ */
+function createVariantSection(props: CreditsPanelProps, variantId: string) {
+  const variant = getVariant(variantId)
   const controller = createCreditsPanelController({
     fetchStats: async () =>
-      (await props.context.client.rpc(QoderRpc).stats({})) as QoderStatsOutput,
+      (await props.context.client.rpc(QoderRpc).stats({ variant: variantId })) as QoderStatsOutput,
     fetchQuota: async ({ refresh }) =>
-      (await props.context.client.rpc(QoderRpc).quota({ refresh })) as QoderQuotaOutput,
+      (await props.context.client.rpc(QoderRpc).quota({ variant: variantId, refresh })) as QoderQuotaOutput,
     fetchPricing: async ({ refresh }) =>
-      (await props.context.client.rpc(QoderRpc).pricing({ refresh })) as QoderPricingOutput,
+      (await props.context.client.rpc(QoderRpc).pricing({ variant: variantId, refresh })) as QoderPricingOutput,
   })
   const [state, setState] = createSignal(controller.getState())
   const unsubscribe = controller.subscribe(() => setState(controller.getState()))
@@ -50,11 +102,6 @@ export function QoderCreditsPanel(props: CreditsPanelProps) {
   const poller = createStatsPoller({ fetch: () => controller.load() })
   poller.start()
   onCleanup(() => poller.stop())
-
-  const activate = (action: string) => {
-    if (action === "toggle-pricing") controller.togglePricing()
-    else if (action === "refresh") void controller.refresh()
-  }
 
   const lines = createMemo<PanelLine[]>(() => [
     ...creditsPanelLines({
@@ -72,39 +119,15 @@ export function QoderCreditsPanel(props: CreditsPanelProps) {
     ...panelFooterLines({ refreshing: state().refreshing }),
   ])
 
-  return (
-    <box id="sidebar.qoder-credits" flexDirection="column" gap={0}>
-      <text
-        id="sidebar.qoder-credits.title"
-        fg={theme.text.base}
-        onMouseUp={(event) => {
-          if (event.button !== 0) return
-          void (async () => {
-            await props.onStatus()
-            await controller.reload()
-          })()
-        }}
-      >
-        <b>Qoder Credits</b>
-      </text>
-      <For each={lines()}>
-        {(line, index) => (
-          <text
-            id={`sidebar.qoder-credits.line.${index()}`}
-            fg={toneColor(theme, line.tone)}
-            onMouseUp={(event) => {
-              if (!line.action) return
-              if (event.button !== 0) return
-              event.stopPropagation()
-              activate(line.action)
-            }}
-          >
-            {line.text}
-          </text>
-        )}
-      </For>
-    </box>
-  )
+  return {
+    id: variant.id,
+    name: variant.name,
+    lines,
+    activate(action: string) {
+      if (action === "toggle-pricing") controller.togglePricing()
+      else if (action === "refresh") void controller.refresh()
+    },
+  }
 }
 
 function toneColor(theme: Context["theme"], tone: "base" | "muted" | "warning"): string {

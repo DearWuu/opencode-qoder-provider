@@ -6,6 +6,7 @@ import { join } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
 const FAKE_CLI = fileURLToPath(new URL("./fixtures/fake-qoder.mjs", import.meta.url))
+const FAKE_INTL_CLI = fileURLToPath(new URL("./fixtures/fake-qoder-intl.mjs", import.meta.url))
 
 test("the provider runtime loads through a file:// URL and exposes createQoder", async () => {
   const providerFile = fileURLToPath(new URL("../provider.mjs", import.meta.url))
@@ -23,15 +24,35 @@ test("the provider runtime loads through a file:// URL and exposes createQoder",
   })
 
   assert.equal(provider.specificationVersion, "v3")
-  assert.equal(provider.provider, "qoder")
+  // 缺省变体是 CN。
+  assert.equal(provider.provider, "qodercn")
   assert.equal(typeof provider.languageModel, "function")
 
   const model = provider.languageModel("Auto")
   assert.equal(model.specificationVersion, "v3")
-  assert.equal(model.provider, "qoder")
+  assert.equal(model.provider, "qodercn")
   assert.equal(model.modelId, "Auto")
   assert.equal(typeof model.doGenerate, "function")
   assert.equal(typeof model.doStream, "function")
+})
+
+test("the overseas variant gets its own provider id and CLI path", async () => {
+  const providerFile = fileURLToPath(new URL("../provider.mjs", import.meta.url))
+  const module = await import(pathToFileURL(providerFile).href)
+
+  const dir = mkdtempSync(join(tmpdir(), "qoder-runtime-test-"))
+  const provider = module.createQoder({
+    variant: "qoder",
+    variants: { qoder: { cliPath: FAKE_INTL_CLI } },
+    cwd: dir,
+    timeoutMs: 20_000,
+    logFile: join(dir, "calls.jsonl"),
+  })
+
+  assert.equal(provider.provider, "qoder")
+  const model = provider.languageModel("Ultimate")
+  assert.equal(model.provider, "qoder")
+  assert.equal(model.modelId, "Ultimate")
 })
 
 test("the native model(modelID, settings) protocol also returns a LanguageModelV3", async () => {

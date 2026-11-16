@@ -1,12 +1,12 @@
 /**
- * 文件职责：`/qoder models` 与 `/qoder status` 的倍率、促销态文案测试。
+ * 文件职责：`/qoder models` 与 `/qoder status` 的倍率、促销态文案，以及变体 token 解析测试。
  * 上游：node:test / Bun test。
  * 下游：src/command.mjs；只读本地空日志，不联网、不调用模型。
  */
 import { test } from "node:test"
 import assert from "node:assert/strict"
 
-import { buildModelsText, buildStatusText } from "../src/command.mjs"
+import { buildModelsText, buildStatusText, parseCommand, preview } from "../src/command.mjs"
 
 const NOW_MS = Date.parse("2026-11-11T10:00:00.000Z")
 // 2026-11-12 07:30 Asia/Shanghai：距离 08:00 结束还有 30 分钟。
@@ -15,6 +15,7 @@ const ACTIVE_NOW_MS = Date.parse("2026-11-11T23:30:00.000Z")
 const UPCOMING_NOW_MS = Date.parse("2026-11-11T13:00:00.000Z")
 
 const OPTIONS = {
+  variantId: "qodercn",
   cliPath: "qoderclicn",
   permissionMode: "bypass_permissions",
   timeoutMs: 1_800_000,
@@ -50,15 +51,43 @@ const PRICING = {
 
 test("/qoder models appends the factor and promotion only to matched models", () => {
   const text = buildModelsText(CATALOG, undefined, PRICING, ACTIVE_NOW_MS)
-  assert.match(text, /- qoder\/glm-5-3\s+GLM-5\.3\s+0\.10x 低峰 · 30 分后恢复 0\.50x/)
-  assert.match(text, /- qoder\/auto\s+Auto$/)
+  assert.match(text, /- qodercn\/glm-5-3\s+GLM-5\.3\s+0\.10x 低峰 · 30 分后恢复 0\.50x/)
+  assert.match(text, /- qodercn\/auto\s+Auto$/)
 })
 
 test("/qoder models keeps its original lines without a pricing snapshot", () => {
   const text = buildModelsText(CATALOG, undefined, null, NOW_MS)
-  assert.match(text, /- qoder\/glm-5-3\s+GLM-5\.3(?:\n|$)/)
-  assert.match(text, /- qoder\/auto\s+Auto$/)
+  assert.match(text, /- qodercn\/glm-5-3\s+GLM-5\.3(?:\n|$)/)
+  assert.match(text, /- qodercn\/auto\s+Auto$/)
   assert.equal(/0\.10x/.test(text), false)
+})
+
+test("the overseas variant lists its own model references", () => {
+  const text = buildModelsText(CATALOG, undefined, PRICING, ACTIVE_NOW_MS, "qoder")
+  assert.match(text, /Qoder \(Credits\) models \(2\)/)
+  assert.match(text, /- qoder\/glm-5-3\s+GLM-5\.3/)
+  assert.equal(/qodercn\//.test(text), false)
+})
+
+test("the command parser reads the variant token before the subcommand", () => {
+  assert.deepEqual(parseCommand("/qoder models"), { variantId: "qodercn", subcommand: "models", explicit: false })
+  assert.deepEqual(parseCommand("/qoder"), { variantId: "qodercn", subcommand: "status", explicit: false })
+  assert.deepEqual(parseCommand("status"), { variantId: "qodercn", subcommand: "status", explicit: false })
+  assert.deepEqual(parseCommand("/qoder cn models"), { variantId: "qodercn", subcommand: "models", explicit: true })
+  assert.deepEqual(parseCommand("/qoder qodercn refresh"), { variantId: "qodercn", subcommand: "refresh", explicit: true })
+  assert.deepEqual(parseCommand("/qoder intl models"), { variantId: "qoder", subcommand: "models", explicit: true })
+  assert.deepEqual(parseCommand("/qoder qoder models"), { variantId: "qoder", subcommand: "models", explicit: true })
+  assert.deepEqual(parseCommand("/qoder global status"), { variantId: "qoder", subcommand: "status", explicit: true })
+  // 只给变体 token 时按 status 处理。
+  assert.deepEqual(parseCommand("/qoder intl"), { variantId: "qoder", subcommand: "status", explicit: true })
+  // token 放在子命令后也认。
+  assert.deepEqual(parseCommand("/qoder models intl"), { variantId: "qoder", subcommand: "models", explicit: true })
+  assert.deepEqual(parseCommand("models cn"), { variantId: "qodercn", subcommand: "models", explicit: true })
+})
+
+test("the catalog preview uses the variant prefix", () => {
+  assert.equal(preview([{ id: "auto" }, { id: "fast" }], 6, "qodercn"), "qodercn/auto, qodercn/fast")
+  assert.equal(preview([{ id: "auto" }, { id: "fast" }], 6, "qoder"), "qoder/auto, qoder/fast")
 })
 
 test("/qoder status adds a Pricing summary while the low-peak window is active", () => {

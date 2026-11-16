@@ -1,7 +1,11 @@
 /**
- * 文件职责：OpenCode 服务端插件入口：注册 Qoder provider 与模型目录、`/qoder` 命令、`qoder` RPC。
+ * 文件职责：OpenCode 服务端插件入口：注册两个 Qoder provider（CN / 海外）与其模型目录、`/qoder` 命令、`qoder` RPC。
  * 上游：OpenCode 插件加载器调用 QoderProviderPlugin.setup。
- * 下游：src/catalog、src/catalog-sync、src/command、src/logger、src/models、src/options、src/pricing、src/provider、src/quota、src/stats、rpc.ts、provider.mjs。
+ * 下游：src/catalog、src/catalog-sync、src/command、src/logger、src/models、src/options、src/pricing、
+ *       src/provider、src/quota、src/stats、src/variants、rpc.ts、provider.mjs。
+ *
+ * 两个变体各自独立：目录发现、额度读取、倍率快照、目录同步域、调用日志归属都按变体隔离；
+ * provider 注册与 RPC 契约共用一份（契约只增 `variant` 字段）。
  */
 import { Plugin } from "@opencode/plugin"
 import type { Model } from "@opencode/schema/model"
@@ -10,15 +14,16 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 
 import { fetchCliVersion, fetchModelList } from "./src/catalog.mjs"
 import { createCatalogSync } from "./src/catalog-sync.mjs"
-import { buildLoginText, buildModelsText, buildStatusText, buildUsageText, parseSubcommand, preview } from "./src/command.mjs"
+import { buildLoginText, buildModelsText, buildStatusText, buildUsageText, parseCommand, preview } from "./src/command.mjs"
 import { readCallLog } from "./src/logger.mjs"
 import { buildModelCatalog } from "./src/models.mjs"
-import { PROVIDER_ID, PROVIDER_NAME, resolveOptions } from "./src/options.mjs"
+import { resolveOptions } from "./src/options.mjs"
 import { createPricingStore } from "./src/pricing.mjs"
 import { fetchPricingFromQoder } from "./src/pricing-qoder.mjs"
 import { createQoder } from "./src/provider.mjs"
 import { createQuotaStore, formatQuotaStatus } from "./src/quota.mjs"
 import { computeQoderStats } from "./src/stats.mjs"
+import { DEFAULT_VARIANT_ID, VARIANT_IDS, getVariant, isVariantId } from "./src/variants.mjs"
 import { QoderRpc } from "./rpc.ts"
 
 const PLUGIN_ID = "opencode-qoder-provider"
@@ -38,136 +43,102 @@ interface CatalogEntry {
   name: string
 }
 
+/**
+ * 单个变体的运行时：自己的选项、SDK、额度与倍率存储、目录发现与同步域。
+ */
+interface VariantRuntime {
+  id: string
+  name: string
+  options: ReturnType<typeof resolveOptions>
+  sdk: ReturnType<typeof createQoder>
+  quotaStore: ReturnType<typeof createQuotaStore>
+  pricingStore: ReturnType<typeof createPricingStore>
+  catalog: () => CatalogEntry[]
+  discoveryError: () => string | undefined
+  cliVersion: () => string | undefined
+  discover: () => Promise<boolean>
+  publishCatalog: () => Promise<unknown>
+  stats: (entries: Array<Record<string, any>>) => ReturnType<typeof computeQoderStats>
+  dispose: () => Promise<void>
+}
+
 export const QoderProviderPlugin = Plugin.define({
   id: PLUGIN_ID,
   async setup(ctx) {
     const providerFile = fileURLToPath(new URL("./provider.mjs", import.meta.url))
     const providerPackage = `aisdk:${pathToFileURL(providerFile).href}`
 
-    const options = resolveOptions({ ...(ctx.options ?? {}), cwd: ctx.location?.directory })
-    const sdk = createQoder(options)
-    const readUsage = (ctx.options as any)?.readUsage
-    const quotaStore = createQuotaStore({
-      cliPath: options.cliPath,
-      cwd: options.cwd,
-      readUsage: typeof readUsage === "function" ? readUsage : undefined,
-    })
-    // 默认真实提取器只跑 `--list-models`（零模型调用）；测试/后续接入仍可经 options.fetchPricing 注入覆盖。
-    const injectedFetchPricing = (ctx.options as any)?.fetchPricing
-    const pricingStore = createPricingStore({
-      ttlMs: options.pricingTtlMs,
-      fetchPricing: typeof injectedFetchPricing === "function"
-        ? injectedFetchPricing
-        : () => fetchPricingFromQoder({
-            cliPath: options.cliPath,
-            cwd: options.cwd,
-            timeoutMs: options.pricingTimeoutMs,
-          }),
-    })
-
-    let catalog: CatalogEntry[] = PLACEHOLDER_CATALOG
-    let discoveryError: string | undefined
-    let cliVersion: string | undefined
-    let discoveryGeneration = 0
-
-    // 目录状态按 location 隔离，但 refresh 的发现结果要同步给所有已加载 location：
-    // 广播到达时同时递增代数，让更早发起的慢发现不能覆盖广播结果。
-    const catalogSync = createCatalogSync({
-      location: options.cwd ?? ctx.location?.directory,
-      apply: async (entries: CatalogEntry[]) => {
-        discoveryGeneration += 1
-        catalog = entries
-        discoveryError = undefined
-        await ctx.provider.reload()
-      },
-    })
-
-    const discover = async () => {
-      const generation = ++discoveryGeneration
-      try {
-        const entries = await fetchModelList({
-          cliPath: options.cliPath,
-          cwd: options.cwd,
-          timeoutMs: options.timeoutMs,
-        })
-        const built = buildModelCatalog(entries)
-        if (built.length === 0) throw new Error("Qoder CLI returned an empty model catalog.")
-        if (generation !== discoveryGeneration) return false
-        catalog = built
-        discoveryError = undefined
-        return true
-      } catch (error) {
-        if (generation === discoveryGeneration) {
-          discoveryError = error instanceof Error ? error.message : String(error)
-        }
-        return false
-      }
-    }
-
-    await discover()
-    try {
-      cliVersion = await fetchCliVersion({ cliPath: options.cliPath })
-    } catch {
-      cliVersion = undefined
-    }
+    const rawOptions = { ...(ctx.options ?? {}), cwd: ctx.location?.directory }
+    const runtimes = await Promise.all(VARIANT_IDS.map((variantId) => createVariantRuntime(variantId, ctx, rawOptions)))
+    const runtimeFor = (variantId: string | undefined) =>
+      runtimes.find((runtime) => runtime.id === variantId) ?? runtimes[0]!
 
     /**
      * `/qoder` 命令的唯一实现。
      *
      * 服务端命令与 `qoder` RPC 契约都调用它，保证 TUI dialog 与 API 的回答不会各写一套。
+     * 文本里的变体 token 优先于 RPC 入参的 `variant`。
      */
-    const executeQoderCommand = async (text: string): Promise<string> => {
-      const subcommand = parseSubcommand(text)
+    const executeQoderCommand = async (text: string, variantOverride?: string): Promise<string> => {
+      const parsed = parseCommand(text)
+      const variantId = parsed.explicit ? parsed.variantId : (isVariantId(variantOverride) ? variantOverride : parsed.variantId)
+      const runtime = runtimeFor(variantId)
+      const subcommand = parsed.subcommand
 
       if (subcommand === "refresh") {
-        const ok = await discover()
+        const ok = await runtime.discover()
         // 发现成功才广播；失败保留旧目录且不打扰其他 location。
         // 各 location 的本地目录更新与 provider.reload() 都由订阅回调统一执行，含本实例。
-        if (ok) await catalogSync.publish(catalog)
+        if (ok) await runtime.publishCatalog()
         const [quota] = await Promise.all([
-          quotaStore.read({ refresh: true }),
-          pricingStore.read({ refresh: true }),
+          runtime.quotaStore.read({ refresh: true }),
+          runtime.pricingStore.read({ refresh: true }),
         ])
         const catalogText = ok
-          ? `Refreshed the Qoder model catalog: ${catalog.length} models (${preview(catalog)}).`
-          : `Could not refresh the Qoder model catalog: ${discoveryError}\nThe previous catalog (${preview(catalog)}) stays active.`
+          ? `Refreshed the ${runtime.name} model catalog: ${runtime.catalog().length} models (${preview(runtime.catalog(), 6, runtime.id)}).`
+          : `Could not refresh the ${runtime.name} model catalog: ${runtime.discoveryError()}\nThe previous catalog (${preview(runtime.catalog(), 6, runtime.id)}) stays active.`
         return `${catalogText}\n${formatQuotaStatus(quota)}`
       }
       if (subcommand === "models") {
-        const pricing = await pricingStore.read()
-        return buildModelsText(catalog, discoveryError, pricing, Date.now())
+        const pricing = await runtime.pricingStore.read()
+        return buildModelsText(runtime.catalog(), runtime.discoveryError(), pricing, Date.now(), runtime.id)
       }
-      if (subcommand === "login") return buildLoginText(options.cliPath)
+      if (subcommand === "login") return buildLoginText(runtime.options.cliPath, runtime.id)
       if (subcommand === "status") {
         const [quota, pricing] = await Promise.all([
-          quotaStore.read({ refresh: true }),
-          pricingStore.read(),
+          runtime.quotaStore.read({ refresh: true }),
+          runtime.pricingStore.read(),
         ])
-        return `${buildStatusText(options, catalog, discoveryError, cliVersion, pricing, Date.now())}\n${formatQuotaStatus(quota)}`
+        return `${buildStatusText(runtime.options, runtime.catalog(), runtime.discoveryError(), runtime.cliVersion(), pricing, Date.now())}\n${formatQuotaStatus(quota)}`
       }
       return buildUsageText()
     }
 
-    // OpenCode 通过这个 hook 解析 `aisdk:` 包路径，随后调用 `sdk.languageModel(modelID)`。
-    await ctx.aisdk.hook(
-      "sdk",
-      (input) => {
-        input.sdk = sdk
-      },
-      { providerID: PROVIDER_ID },
-    )
-
+    // 两个 provider 一次注册：OpenCode 的 transform 在 reload 时会整体重放。
     await ctx.provider.transform((editor) => {
-      editor.add({
-        info: buildProviderInfo(providerPackage),
-        models: buildModelInfos(catalog, providerPackage, options.contextLimit),
-      })
+      for (const runtime of runtimes) {
+        editor.add({
+          info: buildProviderInfo(providerPackage, runtime.id, runtime.name),
+          models: buildModelInfos(runtime.catalog(), providerPackage, runtime.options.contextLimit, runtime.id),
+        })
+      }
     })
+
+    // 每个变体一个 scoped aisdk hook：OpenCode 按 provider ID 把各自的 SDK 接上。
+    for (const runtime of runtimes) {
+      await ctx.aisdk.hook(
+        "sdk",
+        (input) => {
+          input.sdk = runtime.sdk
+        },
+        { providerID: runtime.id },
+      )
+    }
 
     await ctx.command.transform((editor) => {
       editor.add({
         name: "qoder",
-        description: "Qoder provider status, model refresh, catalog and login help",
+        description: "Qoder provider status, model refresh, catalog and login help (CN and overseas variants)",
         execute: async (input) => {
           const text = await executeQoderCommand(input.prompt.text)
 
@@ -186,52 +157,159 @@ export const QoderProviderPlugin = Plugin.define({
     // TUI 侧调用这份契约把回答显示在 dialog 里，并为侧边栏 Credits 面板取数。
     const rpcRegistration = await ctx.rpc.register(QoderRpc, {
       execute: async (input) => {
-        const { text } = input as { text: string }
-        return { text: await executeQoderCommand(text) }
+        const { text, variant } = input as { text: string, variant?: string }
+        return { text: await executeQoderCommand(text, variant) }
       },
-      stats: async () => {
+      stats: async (input) => {
+        const runtime = runtimeFor((input as { variant?: string }).variant)
         // 只读聚合本地调用日志：不调模型、不读取官方配额。
-        const entries = readCallLog(options.logFile, 100_000)
-        return computeQoderStats(entries, {
-          provider: PROVIDER_ID,
-          models: catalog.length,
-          authenticated: discoveryError === undefined,
-          permissionMode: options.permissionMode,
-          cliVersion: cliVersion ?? "",
+        const entries = readCallLog(runtime.options.logFile, 100_000)
+        return runtime.stats(entries)
+      },
+      quota: async (input) => {
+        const runtime = runtimeFor((input as { variant?: string }).variant)
+        return runtime.quotaStore.read({
+          refresh: (input as { refresh?: boolean }).refresh === true,
         })
       },
-      quota: async (input) => quotaStore.read({
-        refresh: (input as { refresh?: boolean }).refresh === true,
-      }),
-      pricing: async (input) => pricingStore.read({
-        refresh: (input as { refresh?: boolean }).refresh === true,
-      }),
+      pricing: async (input) => {
+        const runtime = runtimeFor((input as { variant?: string }).variant)
+        return runtime.pricingStore.read({
+          refresh: (input as { refresh?: boolean }).refresh === true,
+        })
+      },
     })
 
     return async () => {
-      catalogSync.dispose()
-      quotaStore.dispose()
-      pricingStore.dispose()
+      for (const runtime of runtimes) await runtime.dispose()
       await rpcRegistration.dispose()
     }
   },
 })
 
+/**
+ * 建立单个变体的运行时实例，并完成首次目录发现与版本读取。
+ *
+ * @param {string} variantId
+ * @param {any} ctx OpenCode 插件上下文
+ * @param {Record<string, any>} rawOptions 插件原始选项
+ * @returns {Promise<VariantRuntime>}
+ */
+async function createVariantRuntime(variantId: string, ctx: any, rawOptions: Record<string, any>): Promise<VariantRuntime> {
+  const variant = getVariant(variantId)
+  const options = resolveOptions({ ...rawOptions, variant: variantId })
+  const sdk = createQoder(options)
 
-function buildProviderInfo(providerPackage: string): Provider.Info {
+  const readUsage = rawOptions.variants?.[variantId]?.readUsage ?? rawOptions.readUsage
+  const quotaStore = createQuotaStore({
+    cliPath: options.cliPath,
+    variantId: variant.id,
+    cwd: options.cwd,
+    readUsage: typeof readUsage === "function" ? readUsage : undefined,
+  })
+
+  // 默认真实提取器只跑 `--list-models`（零模型调用）；测试/后续接入仍可经 options.fetchPricing 注入覆盖。
+  const injectedFetchPricing = rawOptions.variants?.[variantId]?.fetchPricing ?? rawOptions.fetchPricing
+  const pricingStore = createPricingStore({
+    ttlMs: options.pricingTtlMs,
+    fetchPricing: typeof injectedFetchPricing === "function"
+      ? injectedFetchPricing
+      : () => fetchPricingFromQoder({
+          cliPath: options.cliPath,
+          cwd: options.cwd,
+          timeoutMs: options.pricingTimeoutMs,
+        }),
+  })
+
+  let catalog: CatalogEntry[] = PLACEHOLDER_CATALOG
+  let discoveryError: string | undefined
+  let cliVersion: string | undefined
+  let discoveryGeneration = 0
+
+  // 目录状态按 location 隔离，但 refresh 的发现结果要同步给所有已加载 location：
+  // 广播到达时同时递增代数，让更早发起的慢发现不能覆盖广播结果。
+  // 同步域按变体隔离：两个变体的目录互不覆盖。
+  const catalogSync = createCatalogSync({
+    location: options.cwd ?? ctx.location?.directory,
+    scope: `qoder-provider.${variant.id}`,
+    apply: async (entries: CatalogEntry[]) => {
+      discoveryGeneration += 1
+      catalog = entries
+      discoveryError = undefined
+      await ctx.provider.reload()
+    },
+  })
+
+  const discover = async () => {
+    const generation = ++discoveryGeneration
+    try {
+      const entries = await fetchModelList({
+        cliPath: options.cliPath,
+        cwd: options.cwd,
+        timeoutMs: options.timeoutMs,
+      })
+      const built = buildModelCatalog(entries)
+      if (built.length === 0) throw new Error("Qoder CLI returned an empty model catalog.")
+      if (generation !== discoveryGeneration) return false
+      catalog = built
+      discoveryError = undefined
+      return true
+    } catch (error) {
+      if (generation === discoveryGeneration) {
+        discoveryError = error instanceof Error ? error.message : String(error)
+      }
+      return false
+    }
+  }
+
+  await discover()
+  try {
+    cliVersion = await fetchCliVersion({ cliPath: options.cliPath })
+  } catch {
+    cliVersion = undefined
+  }
+
   return {
-    id: PROVIDER_ID,
-    name: PROVIDER_NAME,
+    id: variant.id,
+    name: variant.name,
+    options,
+    sdk,
+    quotaStore,
+    pricingStore,
+    catalog: () => catalog,
+    discoveryError: () => discoveryError,
+    cliVersion: () => cliVersion,
+    discover,
+    publishCatalog: () => catalogSync.publish(catalog),
+    stats: (entries) => computeQoderStats(entries, {
+      provider: variant.id,
+      models: catalog.length,
+      authenticated: discoveryError === undefined,
+      permissionMode: options.permissionMode,
+      cliVersion: cliVersion ?? "",
+    }),
+    dispose: async () => {
+      catalogSync.dispose()
+      quotaStore.dispose()
+      pricingStore.dispose()
+    },
+  }
+}
+
+function buildProviderInfo(providerPackage: string, providerId: string, providerName: string): Provider.Info {
+  return {
+    id: providerId,
+    name: providerName,
     activation: "enabled",
     package: providerPackage,
   } as unknown as Provider.Info
 }
 
-function buildModelInfos(catalog: CatalogEntry[], providerPackage: string, contextLimit: number): Model.Info[] {
+function buildModelInfos(catalog: CatalogEntry[], providerPackage: string, contextLimit: number, providerId: string): Model.Info[] {
   return catalog.map((entry) => ({
     id: entry.id,
     modelID: entry.modelID,
-    providerID: PROVIDER_ID,
+    providerID: providerId,
     name: entry.name,
     package: providerPackage,
     capabilities: { tools: false, input: ["text"], output: ["text"] },

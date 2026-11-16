@@ -1,7 +1,8 @@
 /**
- * 文件职责：经 `qoderclicn --list-models` + 捕获 hook 提取每模型实时积分倍率快照（零模型调用）。
+ * 文件职责：经 CLI `--list-models` + 捕获 hook 提取每模型实时积分倍率快照（零模型调用）。
  * 上游：index.ts 的默认 fetchPricing（传 cliPath/cwd/超时）。
- * 下游：src/cli.runCli（spawn/超时/进程树终止）、src/pricing-capture.mjs（经 NODE_OPTIONS --import 注入 CLI）。
+ * 下游：src/cli.runCli（spawn/超时/进程树终止）、src/pricing-capture.mjs（经 NODE_OPTIONS --import 注入 CLI）、
+ *       src/variants.cliCommandName（来源文案里的实际命令名）。
  *
  * CLI 的 `--list-models` 会先解密模型目录再打印；捕获 hook 包装 JSON.parse 取得同一份明文，
  * 因此不额外请求账户接口、不运行模型。任何失败（未登录、超时、形状不符、未捕获）都返回 null，
@@ -14,13 +15,27 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 
 import { runCli } from "./cli.mjs"
 import { PRICING_TIMEOUT_MS } from "./pricing.mjs"
+import { cliCommandName } from "./variants.mjs"
 
-/** 快照的 source 文案：说明数据来自目录明文的捕获，而不是账户 HTTP API。 */
+/** 快照的 source 文案（CN 变体默认值）：说明数据来自目录明文的捕获，而不是账户 HTTP API。 */
 export const PRICING_SOURCE = "qoderclicn --list-models + JSON.parse capture hook (catalog plaintext)"
 
 const CAPTURE_DIR_ENV = "QODER_PRICING_CAPTURE_DIR"
 const CAPTURE_HOOK_PATH = fileURLToPath(new URL("./pricing-capture.mjs", import.meta.url))
 const CAPTURE_FILE = /^capture-(\d+)\.json$/
+
+/**
+ * 按实际 CLI 命令名拼出来源文案（`qoderclicn` / `qodercli` 等）。
+ *
+ * @param {string} cliPath
+ * @returns {string}
+ */
+export function pricingSourceLabel(cliPath) {
+  const command = cliCommandName(cliPath)
+  return command.length > 0
+    ? `${command} --list-models + JSON.parse capture hook (catalog plaintext)`
+    : PRICING_SOURCE
+}
 
 /**
  * 把捕获 hook 追加到既有 NODE_OPTIONS；绝不上整体覆盖，避免丢掉用户/环境已有的 Node 参数。
@@ -80,7 +95,7 @@ export async function extractPricing(options = {}) {
       return null
     }
     if (run.timedOut || run.code !== 0) return null
-    return parsePricingCaptures(readCaptures(captureDir), new Date(now()).toISOString())
+    return parsePricingCaptures(readCaptures(captureDir), new Date(now()).toISOString(), pricingSourceLabel(cliPath))
   } finally {
     try {
       rmSync(captureDir, { recursive: true, force: true })
@@ -98,9 +113,10 @@ export async function extractPricing(options = {}) {
  *
  * @param {unknown[]} captures 每个捕获文件解析后的对象。
  * @param {string} [fetchedAt]
+ * @param {string} [source] 来源文案（默认按 CN CLI 名）。
  * @returns {object|null}
  */
-export function parsePricingCaptures(captures, fetchedAt = new Date().toISOString()) {
+export function parsePricingCaptures(captures, fetchedAt = new Date().toISOString(), source = PRICING_SOURCE) {
   if (!Array.isArray(captures) || captures.length === 0) return null
   const models = findCatalog(captures)
   if (!models) return null
@@ -121,7 +137,7 @@ export function parsePricingCaptures(captures, fetchedAt = new Date().toISOStrin
     mapped.push(entry)
   }
   if (mapped.length === 0) return null
-  return { models: mapped, fetchedAt, source: PRICING_SOURCE }
+  return { models: mapped, fetchedAt, source }
 }
 
 /** 依次尝试顶层数组与 `{ assistant: [...] }`；未命中返回 undefined。 */
