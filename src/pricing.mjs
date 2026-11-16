@@ -177,8 +177,9 @@ export function modelPricingLine(model, nowMs = Date.now()) {
 /**
  * 面板「模型倍率」段：数据缺失或为空时返回空数组，让整段隐藏。
  *
- * 展开（默认）：`模型倍率 ▾` + 每行 `{modelKey} {factor}x {促销态}` + 尾行 `{HH:mm} 更新`。
- * 折叠：只剩 `模型倍率 ▸ {有效模型数}` 一行。
+ * 折叠（默认）：只剩 `模型倍率 ▸ {有效模型数}` 一行。
+ * 展开：`模型倍率 ▾` + 每行 `{modelKey} {factor}x {促销态}` + 尾行 `{HH:mm} 更新`。
+ * `collapsed` 未传时按折叠渲染，与面板启动态一致。
  * 两种状态的标题行都带 `action: "toggle-pricing"`，由面板接线到鼠标左键点击切换。
  *
  * 调用方：panel.tsx（经 createMemo 渲染面板行）。
@@ -199,7 +200,7 @@ export function pricingPanelLines(input = {}) {
     rows.push({ tone: "muted", text: `${key} ${detail}` })
   }
   if (rows.length === 0) return []
-  if (input.collapsed === true) {
+  if (input.collapsed !== false) {
     return [{ tone: "base", text: `模型倍率 ▸ ${rows.length}`, action: "toggle-pricing" }]
   }
   const lines = [{ tone: "base", text: "模型倍率 ▾", action: "toggle-pricing" }, ...rows]

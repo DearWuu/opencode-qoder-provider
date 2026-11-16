@@ -188,7 +188,7 @@ test("the panel hides the whole pricing section when data is missing or empty", 
 })
 
 test("the panel shows each model factor, the active countdown and the update time", () => {
-  const lines = pricingPanelLines({ pricing: snapshot([activeModel(), { modelKey: "Auto", priceFactor: 1 }]), nowMs: ACTIVE_NOW_MS })
+  const lines = pricingPanelLines({ pricing: snapshot([activeModel(), { modelKey: "Auto", priceFactor: 1 }]), nowMs: ACTIVE_NOW_MS, collapsed: false })
   assert.deepEqual(lines.slice(0, 3), [
     { tone: "base", text: "模型倍率 ▾", action: "toggle-pricing" },
     { tone: "muted", text: "GLM-5.3 0.10x 低峰 · 30 分后恢复 0.50x" },
@@ -208,19 +208,23 @@ test("the collapsed panel keeps one header line with the valid model count", () 
   assert.deepEqual(pricingPanelLines({ pricing, nowMs: ACTIVE_NOW_MS, collapsed: true }), [
     { tone: "base", text: "模型倍率 ▸ 2", action: "toggle-pricing" },
   ])
-  // 折叠不影响默认展开态：标题带 ▾ 与全部模型行。
-  assert.equal(pricingPanelLines({ pricing, nowMs: ACTIVE_NOW_MS })[0]!.text, "模型倍率 ▾")
+  // 未传 collapsed 时按折叠渲染（与面板启动态一致）。
+  assert.deepEqual(pricingPanelLines({ pricing, nowMs: ACTIVE_NOW_MS }), [
+    { tone: "base", text: "模型倍率 ▸ 2", action: "toggle-pricing" },
+  ])
+  // 显式展开时标题带 ▾ 与全部模型行。
+  assert.equal(pricingPanelLines({ pricing, nowMs: ACTIVE_NOW_MS, collapsed: false })[0]!.text, "模型倍率 ▾")
   // 无有效模型时即使折叠也整段隐藏。
   assert.deepEqual(pricingPanelLines({ pricing: snapshot([]), collapsed: true }), [])
 })
 
 test("the panel renders the upcoming low-peak state with its badge", () => {
-  const lines = pricingPanelLines({ pricing: snapshot([upcomingModel()]), nowMs: UPCOMING_NOW_MS })
+  const lines = pricingPanelLines({ pricing: snapshot([upcomingModel()]), nowMs: UPCOMING_NOW_MS, collapsed: false })
   assert.equal(lines[1]!.text, "GLM-5.3 0.50x 1 小时 0 分后进入错峰 4 折")
 })
 
 test("the panel omits the update line when fetchedAt is invalid", () => {
-  const lines = pricingPanelLines({ pricing: snapshot([activeModel()], { fetchedAt: "garbage" }), nowMs: ACTIVE_NOW_MS })
+  const lines = pricingPanelLines({ pricing: snapshot([activeModel()], { fetchedAt: "garbage" }), nowMs: ACTIVE_NOW_MS, collapsed: false })
   assert.equal(lines.length, 2)
   assert.equal(lines[1]!.text, "GLM-5.3 0.10x 低峰 · 30 分后恢复 0.50x")
 })

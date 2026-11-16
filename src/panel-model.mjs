@@ -23,6 +23,9 @@
  * 每个取数函数都返回 Promise；控制器吞掉异常并按各自的降级规则更新状态，
  * 因此调用方不需要 try/catch。状态更新会通知所有订阅者（面板据此重渲染）。
  *
+ * 倍率段默认折叠（`collapsed` 初始为 true）：面板启动只显示 `模型倍率 ▸ {N}`，
+ * 点击标题行才展开。折叠状态只存在内存里，重启后回到折叠。
+ *
  * 手动刷新只在 `quota({ refresh: true })` 与 `pricing({ refresh: true })` 之间并发：
  * - 刷新中重复点击直接忽略；
  * - quota 失败且已有旧数据时保留旧数据、不显示错误；从未取到数据时沿用面板既有错误态；
@@ -57,7 +60,7 @@ export function createCreditsPanelController(options = {}) {
     quotaError: undefined,
     nowMs: now(),
     refreshing: false,
-    collapsed: false,
+    collapsed: true,
   }
   const listeners = new Set()
 

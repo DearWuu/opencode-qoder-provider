@@ -63,7 +63,7 @@ test("load reads stats, quota and pricing once and stamps nowMs", async () => {
   assert.equal(state.quotaError, undefined)
   assert.equal(state.nowMs, NOW_MS)
   assert.equal(state.refreshing, false)
-  assert.equal(state.collapsed, false)
+  assert.equal(state.collapsed, true)
 })
 
 test("refresh forces quota and pricing together without touching stats", async () => {
@@ -151,11 +151,12 @@ test("togglePricing flips the in-memory collapsed flag and notifies subscribers"
   const unsubscribe = controller.subscribe(() => {
     notifications += 1
   })
-  assert.equal((controller.getState() as any).collapsed, false)
-  controller.togglePricing()
+  // 面板启动即折叠：点击标题展开，再点一次折叠。
   assert.equal((controller.getState() as any).collapsed, true)
   controller.togglePricing()
   assert.equal((controller.getState() as any).collapsed, false)
+  controller.togglePricing()
+  assert.equal((controller.getState() as any).collapsed, true)
   assert.equal(notifications, 2)
   unsubscribe()
   controller.togglePricing()
