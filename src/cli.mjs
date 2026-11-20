@@ -96,6 +96,32 @@ export function buildCliArgs({ modelID, cwd, permissionMode, additionalDirs, cli
 }
 
 /**
+ * 把 CLI 路径解析成实际要 spawn 的可执行文件与参数。
+ *
+ * Windows 上 `.js`/`.mjs`/`.cjs` 没有 shebang 支持，直接 spawn 会报 EFTYPE，必须交给 `node`
+ * （由 libuv 在 PATH 上解析成 `node.exe`）；`.cmd`/`.bat` 是批处理脚本，需经 `cmd.exe /d /s /c`
+ * 启动。其他平台（Unix 上 `.js` 有 shebang）与普通可执行文件原样返回。
+ *
+ * @param {string} cliPath
+ * @param {string[]} args
+ * @param {NodeJS.Platform} [platform]
+ * @returns {{ command: string, args: string[] }}
+ */
+export function resolveSpawnCommand(cliPath, args, platform = process.platform) {
+  const list = Array.isArray(args) ? args : []
+  const text = String(cliPath ?? "")
+  if (platform === "win32") {
+    if (/\.(?:js|mjs|cjs)$/i.test(text)) {
+      return { command: "node", args: [text, ...list] }
+    }
+    if (/\.(?:cmd|bat)$/i.test(text)) {
+      return { command: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", text, ...list] }
+    }
+  }
+  return { command: cliPath, args: list }
+}
+
+/**
  * spawn Qoder CLI 并收集其输出。
  *
  * 调用方：src/provider.execute、src/catalog（`--list-models` / `--version`）。
@@ -145,7 +171,8 @@ function spawnCli({ cliPath, args, input, cwd, timeoutMs, idleTimeoutMs, signal,
     const startedAt = Date.now()
     let child
     try {
-      child = spawn(cliPath, args, {
+      const invocation = resolveSpawnCommand(cliPath, args)
+      child = spawn(invocation.command, invocation.args, {
         cwd: cwd || undefined,
         env,
         stdio: ["pipe", "pipe", "pipe"],

@@ -6,7 +6,15 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 
-import { MAX_STDERR_BYTES, MAX_STDOUT_BYTES, buildCliArgs, killTree, parseCliResult, runCli } from "../src/cli.mjs"
+import {
+  MAX_STDERR_BYTES,
+  MAX_STDOUT_BYTES,
+  buildCliArgs,
+  killTree,
+  parseCliResult,
+  resolveSpawnCommand,
+  runCli,
+} from "../src/cli.mjs"
 
 const FAKE_CLI = fileURLToPath(new URL("./fixtures/fake-qoder.mjs", import.meta.url))
 
@@ -477,4 +485,54 @@ test("buildCliArgs skips --reasoning-effort for auto, undefined and unknown valu
     "--reasoning-effort",
     "low",
   ])
+})
+
+test("resolveSpawnCommand on Windows wraps a .js CLI with node and keeps the argument order", () => {
+  const cliPath = "x/y/qoderclicn.js"
+  const args = ["-p", "hi"]
+  assert.deepEqual(resolveSpawnCommand(cliPath, args, "win32"), {
+    command: "node",
+    args: ["x/y/qoderclicn.js", "-p", "hi"],
+  })
+  // 大小写不敏感：Windows 上 .JS / .MJS / .CJS 同样需要 node 包装。
+  assert.deepEqual(resolveSpawnCommand("C:\\root\\QODERCLICN.JS", ["--list-models"], "win32"), {
+    command: "node",
+    args: ["C:\\root\\QODERCLICN.JS", "--list-models"],
+  })
+})
+
+test("resolveSpawnCommand on Windows wraps a .cmd CLI with cmd.exe /d /s /c", () => {
+  const cliPath = "C:\\root\\qodercli.CMD"
+  const args = ["--list-models"]
+  const resolved = resolveSpawnCommand(cliPath, args, "win32")
+  assert.equal(resolved.command, process.env.ComSpec ?? "cmd.exe")
+  assert.deepEqual(resolved.args, ["/d", "/s", "/c", "C:\\root\\qodercli.CMD", "--list-models"])
+  assert.deepEqual(resolveSpawnCommand("C:\\root\\qodercli.bat", [], "win32").args.slice(0, 4), [
+    "/d",
+    "/s",
+    "/c",
+    "C:\\root\\qodercli.bat",
+  ])
+})
+
+test("resolveSpawnCommand leaves .js CLIs untouched on non-Windows platforms", () => {
+  const cliPath = "/usr/lib/qoder/qoderclicn.js"
+  const args = ["-p", "hi"]
+  assert.deepEqual(resolveSpawnCommand(cliPath, args, "linux"), { command: cliPath, args })
+  assert.deepEqual(resolveSpawnCommand(cliPath, args, "darwin"), { command: cliPath, args })
+  // 非 win32 不因 .cmd/.bat 扩展名包装。
+  assert.deepEqual(resolveSpawnCommand("/tmp/qodercli.cmd", ["--version"], "linux"), {
+    command: "/tmp/qodercli.cmd",
+    args: ["--version"],
+  })
+})
+
+test("resolveSpawnCommand leaves Windows executables and extensionless CLIs untouched", () => {
+  const exePath = "C:\\tools\\qodercli.EXE"
+  assert.deepEqual(resolveSpawnCommand(exePath, ["--list-models"], "win32"), {
+    command: exePath,
+    args: ["--list-models"],
+  })
+  const bare = "C:\\tools\\qodercli"
+  assert.deepEqual(resolveSpawnCommand(bare, ["--version"], "win32"), { command: bare, args: ["--version"] })
 })
