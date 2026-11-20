@@ -19,11 +19,15 @@ export function tempDir() {
 export function makeProvider(overrides: Record<string, unknown> = {}) {
   const dir = tempDir()
   const logFile = join(dir, "calls.jsonl")
+  const variant = typeof overrides.variant === "string" ? overrides.variant : "qodercn"
+  const cliPath = typeof overrides.cliPath === "string" ? overrides.cliPath : FAKE_CLI
   const provider = createQoder({
-    cliPath: FAKE_CLI,
+    cliPath,
     cwd: dir,
     timeoutMs: 20_000,
     logFile,
+    // 非 CN 变体只认 variants.<id>.cliPath，全局 cliPath 是 CN 的旧配置键。
+    variants: { [variant]: { cliPath } },
     ...overrides,
   })
   return { provider, dir, logFile }
@@ -74,6 +78,8 @@ export interface FakeEnvKeys {
   FAKE_QODER_ZERO_USAGE?: string
   FAKE_QODER_CONTEXT_RATIO?: string
   FAKE_QODER_RESULT_TEXT?: string
+  FAKE_QODER_NATIVE_NAME?: string
+  FAKE_QODER_NATIVE_INPUT?: string
   FAKE_QODER_STOP_REASON?: string
   FAKE_QODER_USAGE_SPLIT?: string
   FAKE_QODER_EMPTY_STOP?: string

@@ -11,11 +11,16 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import {
+  PRICING_MAX_ATTEMPTS,
+  PRICING_RETRY_BUDGET_MS,
+  PRICING_RETRY_DELAY_MS,
   PRICING_SOURCE,
   buildNodeOptions,
   extractPricing,
+  fetchPricingFromQoder,
   parsePricingCaptures,
   pricingSourceLabel,
+  withColdStartRetry,
 } from "../src/pricing-qoder.mjs"
 
 const FAKE_CLI = fileURLToPath(new URL("./fixtures/fake-qoder.mjs", import.meta.url))
@@ -177,4 +182,157 @@ test("extractPricing kills the CLI tree and returns null on timeout", async () =
   })
   assert.equal(snapshot, null)
   assert.ok(Date.now() - started < 3_000)
+})
+
+test("withColdStartRetry stops at the bounded attempt count and delay defaults", async () => {
+  assert.equal(PRICING_MAX_ATTEMPTS, 3)
+  assert.equal(PRICING_RETRY_DELAY_MS, 1_500)
+  assert.equal(PRICING_RETRY_BUDGET_MS, 60_000)
+
+  let calls = 0
+  const delays: number[] = []
+  const snapshot = await withColdStartRetry(
+    async () => {
+      calls += 1
+      return calls === 2 ? { models: [{ modelKey: "Auto", priceFactor: 1 }] } : null
+    },
+    { sleep: async (ms) => void delays.push(ms), now: () => 0 },
+  )
+
+  assert.deepEqual(snapshot, { models: [{ modelKey: "Auto", priceFactor: 1 }] })
+  assert.equal(calls, 2)
+  assert.deepEqual(delays, [PRICING_RETRY_DELAY_MS])
+})
+
+test("withColdStartRetry returns null once every attempt fails", async () => {
+  let calls = 0
+  const delays: number[] = []
+  const snapshot = await withColdStartRetry(
+    async () => {
+      calls += 1
+      return null
+    },
+    { sleep: async (ms) => void delays.push(ms), now: () => 0 },
+  )
+
+  assert.equal(snapshot, null)
+  assert.equal(calls, PRICING_MAX_ATTEMPTS)
+  assert.deepEqual(delays, [PRICING_RETRY_DELAY_MS, PRICING_RETRY_DELAY_MS])
+})
+
+test("withColdStartRetry never retries a successful attempt", async () => {
+  let calls = 0
+  const delays: number[] = []
+  const value = { models: [{ modelKey: "Auto", priceFactor: 1 }] }
+  const snapshot = await withColdStartRetry(
+    async () => {
+      calls += 1
+      return value
+    },
+    { sleep: async (ms) => void delays.push(ms), now: () => 0 },
+  )
+
+  assert.equal(snapshot, value)
+  assert.equal(calls, 1)
+  assert.deepEqual(delays, [])
+})
+
+test("withColdStartRetry gives up when the remaining budget cannot fit another wait", async () => {
+  let calls = 0
+  const delays: number[] = []
+  const snapshot = await withColdStartRetry(
+    async () => {
+      calls += 1
+      return null
+    },
+    { retryBudgetMs: PRICING_RETRY_DELAY_MS, sleep: async (ms) => void delays.push(ms), now: () => 0 },
+  )
+
+  assert.equal(snapshot, null)
+  assert.equal(calls, 1)
+  assert.deepEqual(delays, [])
+})
+
+test("fetchPricingFromQoder retries the first spawn that produced no catalog", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "qoder-pricing-retry-"))
+  const catalogFile = join(dir, "catalog.json")
+  const recordFile = join(dir, "list-models.jsonl")
+  writeFileSync(catalogFile, JSON.stringify(CATALOG))
+  // 模拟冷启动首拍：CLI 非零退出，第二次才正常打印目录。
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    FAKE_QODER_PRICING: catalogFile,
+    FAKE_QODER_LIST_RECORD: recordFile,
+    FAKE_QODER_LIST_EXIT: "3",
+  }
+  try {
+    const snapshot = (await fetchPricingFromQoder({
+      cliPath: FAKE_CLI,
+      env,
+      timeoutMs: 20_000,
+      now: () => FIXED_MS,
+      sleep: async () => {
+        delete env.FAKE_QODER_LIST_EXIT
+      },
+    })) as any
+
+    assert.ok(snapshot)
+    assert.equal(snapshot.fetchedAt, FIXED_ISO)
+    assert.equal(snapshot.models[0].modelKey, "Qwen3.8-Max")
+    const calls = readFileSync(recordFile, "utf8").trim().split("\n")
+    assert.equal(calls.length, 2)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("fetchPricingFromQoder exhausts its retries and degrades to null honestly", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "qoder-pricing-exhausted-"))
+  const recordFile = join(dir, "list-models.jsonl")
+  try {
+    const snapshot = await fetchPricingFromQoder({
+      cliPath: FAKE_CLI,
+      env: {
+        ...process.env,
+        FAKE_QODER_PRICING: "",
+        FAKE_QODER_LIST_RECORD: recordFile,
+        FAKE_QODER_LIST_EXIT: "3",
+      },
+      timeoutMs: 20_000,
+      retryDelayMs: 0,
+      sleep: async () => {},
+    })
+
+    assert.equal(snapshot, null)
+    const calls = readFileSync(recordFile, "utf8").trim().split("\n")
+    assert.equal(calls.length, PRICING_MAX_ATTEMPTS)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("fetchPricingFromQoder spawns the CLI exactly once on the happy path", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "qoder-pricing-once-"))
+  const catalogFile = join(dir, "catalog.json")
+  const recordFile = join(dir, "list-models.jsonl")
+  writeFileSync(catalogFile, JSON.stringify(CATALOG))
+  try {
+    const snapshot = (await fetchPricingFromQoder({
+      cliPath: FAKE_CLI,
+      env: {
+        ...process.env,
+        FAKE_QODER_PRICING: catalogFile,
+        FAKE_QODER_LIST_RECORD: recordFile,
+      },
+      timeoutMs: 20_000,
+      now: () => FIXED_MS,
+    })) as any
+
+    assert.ok(snapshot)
+    assert.equal(snapshot.models.length, CATALOG.length)
+    const calls = readFileSync(recordFile, "utf8").trim().split("\n")
+    assert.equal(calls.length, 1)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

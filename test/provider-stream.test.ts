@@ -3,6 +3,7 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 
+import { OUTPUT_CONSTRAINT } from "../src/prompt.mjs"
 import { ModelFallbackError } from "../src/result.mjs"
 import { makeProvider, readLogged, withFakeEnv, PROMPT } from "./provider-test-helpers.ts"
 
@@ -24,6 +25,138 @@ test("doStream emits the V3 stream events", async () => {
   assert.equal(parts[4]!.finishReason.unified, "stop")
   assert.equal(parts[4]!.usage.outputTokens.total, 5)
   assert.equal((parts[4]!.providerMetadata.qoder as Record<string, unknown>).credits, 0.25)
+})
+
+test("doStream translates a native mcp_call into a host tool call and hides the CLI error text", async () => {
+  const { provider, logFile } = makeProvider()
+  const model = provider.languageModel("Auto")
+  const tools = [
+    {
+      type: "function",
+      name: "get_weather",
+      description: "Return the current weather for a city",
+      inputSchema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+    },
+  ]
+
+  await withFakeEnv(
+    { FAKE_QODER_MODE: "native-tool", FAKE_QODER_RESULT_TEXT: "The native call failed." },
+    async () => {
+      const { stream } = await model.doStream({ prompt: PROMPT, tools })
+      const parts: any[] = []
+      for await (const part of stream as unknown as AsyncIterable<any>) parts.push(part)
+
+      // 原生 tool_use 之后 CLI 的错误自愈正文不能泄漏给宿主。
+      assert.equal(parts.some((part) => part.type === "text-delta"), false)
+      const call = parts.find((part) => part.type === "tool-call")
+      assert.equal(call.toolName, "get_weather")
+      assert.equal(call.input, '{"city":"Hangzhou"}')
+      assert.deepEqual(parts[parts.length - 1]!.finishReason, { unified: "tool-calls", raw: "end_turn" })
+
+      const logged = readLogged(logFile)
+      assert.equal(logged[0]!.bridge, true)
+      assert.equal(logged[0]!.toolCalls, 1)
+    },
+  )
+})
+
+test("doStream ignores native tools that are not host tools", async () => {
+  const { provider } = makeProvider()
+  const model = provider.languageModel("Auto")
+  const tools = [
+    {
+      type: "function",
+      name: "get_weather",
+      description: "Return the current weather for a city",
+      inputSchema: { type: "object", properties: { city: { type: "string" } } },
+    },
+  ]
+
+  await withFakeEnv(
+    {
+      FAKE_QODER_MODE: "native-tool",
+      FAKE_QODER_NATIVE_NAME: "mcp_list",
+      FAKE_QODER_NATIVE_INPUT: '{"keyword":"weather"}',
+      FAKE_QODER_RESULT_TEXT: "The native call failed.",
+    },
+    async () => {
+      const { stream } = await model.doStream({ prompt: PROMPT, tools })
+      const parts: any[] = []
+      for await (const part of stream as unknown as AsyncIterable<any>) parts.push(part)
+
+      assert.equal(parts.some((part) => part.type === "tool-call"), false)
+      const text = parts.filter((part) => part.type === "text-delta").map((part) => part.delta).join("")
+      assert.equal(text, "The native call failed.")
+      assert.deepEqual(parts[parts.length - 1]!.finishReason, { unified: "stop", raw: "end_turn" })
+    },
+  )
+})
+
+test("doStream bridges host function tools: split envelopes become tool-call parts", async () => {
+  const { provider, dir, logFile } = makeProvider()
+  const model = provider.languageModel("Auto")
+  const record = join(dir, "record.json")
+  const tools = [
+    {
+      type: "function",
+      name: "bash",
+      description: "Run a shell command",
+      inputSchema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+    },
+    { type: "provider", name: "web_search", id: "web_search" },
+  ]
+
+  await withFakeEnv(
+    {
+      FAKE_QODER_MODE: "bridge-stream",
+      FAKE_QODER_RECORD: record,
+      // 真实 CLI 的 result.result 会重复最终回答；日志用它统计信封条数。
+      FAKE_QODER_RESULT_TEXT: 'Before <tool_call>{"name":"bash","arguments":{"command":"ls"}}</tool_call> after',
+    },
+    async () => {
+    const { stream } = await model.doStream({ prompt: PROMPT, tools })
+    const parts: any[] = []
+    for await (const part of stream as unknown as AsyncIterable<any>) parts.push(part)
+
+    assert.deepEqual(
+      parts.map((part) => `${part.type}:${part.id ?? ""}`),
+      [
+        "stream-start:",
+        "text-start:qoder-text-bridge",
+        "text-delta:qoder-text-bridge",
+        "text-delta:qoder-text-bridge",
+        "text-end:qoder-text-bridge",
+        "tool-input-start:" + parts[5]!.id,
+        "tool-input-delta:" + parts[5]!.id,
+        "tool-input-end:" + parts[5]!.id,
+        "tool-call:",
+        "finish:",
+      ],
+    )
+    const text = parts.filter((part) => part.type === "text-delta").map((part) => part.delta).join("")
+    assert.equal(text, "Before  after")
+    assert.match(parts[5]!.id, /^qoder-bridge-[0-9a-z]+-0$/)
+    assert.equal(parts[5]!.toolName, "bash")
+    assert.equal(parts[6]!.delta, '{"command":"ls"}')
+    const call = parts[8]!
+    assert.equal(call.toolName, "bash")
+    assert.equal(call.input, '{"command":"ls"}')
+    assert.deepEqual(parts[9]!.finishReason, { unified: "tool-calls", raw: "end_turn" })
+    // provider 工具无法经文本协议执行：只记 warning，不进协议。
+    assert.equal(parts[0]!.warnings.length, 1)
+    assert.match(parts[0]!.warnings[0].message, /web_search/)
+
+    const recorded = JSON.parse(readFileSync(record, "utf8"))
+    const argv: string[] = recorded.argv
+    assert.equal(argv.includes("--strict-mcp-config"), true)
+    assert.deepEqual(argv.slice(argv.indexOf("--tools")), ["--tools", ""])
+    assert.match(argv[argv.indexOf("--append-system-prompt") + 1]!, /- bash: Run a shell command/)
+
+    const logged = readLogged(logFile)
+    assert.equal(logged[0]!.bridge, true)
+    assert.equal(logged[0]!.toolCalls, 1)
+    },
+  )
 })
 
 test("doStream emits ModelFallbackError without text or finish for an explicit CLI fallback", async () => {
@@ -264,4 +397,82 @@ test("doStream forwards a positive integer maxOutputTokens to --max-output-token
     assert.equal(argv[argv.indexOf("--max-output-tokens") + 1], "2048")
     assert.equal(argv[argv.indexOf("-o") + 1], "stream-json")
   })
+})
+
+test("doStream forwards image parts to the CLI as --attachment temp files", async () => {
+  const { provider, dir } = makeProvider()
+  const model = provider.languageModel("Auto")
+  const record = join(dir, "record.json")
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0]).toString("base64")
+
+  await withFakeEnv({ FAKE_QODER_MODE: "partial", FAKE_QODER_RECORD: record }, async () => {
+    const { stream } = await model.doStream({
+      prompt: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "describe" },
+            { type: "file", data: jpeg, mediaType: "image/jpeg" },
+          ],
+        },
+      ],
+    })
+    for await (const _ of stream as unknown as AsyncIterable<any>) {
+      // 排空
+    }
+    const recorded = JSON.parse(readFileSync(record, "utf8"))
+    assert.equal(recorded.attachments.length, 1)
+    assert.match(recorded.attachments[0].path, /attachment-0\.jpg$/)
+    assert.equal(recorded.attachments[0].base64, jpeg)
+  })
+})
+
+test("doStream appends OUTPUT_CONSTRAINT before the tool protocol and forwards the reasoning effort", async () => {
+  const { provider, dir } = makeProvider()
+  const model = provider.languageModel("Auto")
+  const record = join(dir, "record.json")
+  const tools = [
+    {
+      type: "function",
+      name: "bash",
+      description: "Run a shell command",
+      inputSchema: { type: "object", properties: {} },
+    },
+  ]
+  await withFakeEnv({ FAKE_QODER_MODE: "bridge-stream", FAKE_QODER_RECORD: record }, async () => {
+    const { stream } = await model.doStream({
+      prompt: PROMPT,
+      tools,
+      providerOptions: { qodercn: { reasoningEffort: "medium" } },
+    })
+    for await (const _ of stream as unknown as AsyncIterable<any>) {
+      // 排空
+    }
+  })
+  const argv = (JSON.parse(readFileSync(record, "utf8")) as { argv: string[] }).argv
+  const system = argv[argv.indexOf("--append-system-prompt") + 1]!
+  assert.ok(system.startsWith("be brief\n\n"))
+  assert.ok(system.includes(OUTPUT_CONSTRAINT))
+  const constraintIndex = system.indexOf("# Visible output constraints")
+  const protocolIndex = system.indexOf("- bash: Run a shell command")
+  assert.ok(constraintIndex > 0, "OUTPUT_CONSTRAINT must be appended")
+  assert.ok(protocolIndex > constraintIndex, "tool protocol must follow OUTPUT_CONSTRAINT")
+  assert.equal(argv[argv.indexOf("--reasoning-effort") + 1], "medium")
+})
+
+test("doStream reads reasoningEffort from the nested settings shape of providerOptions", async () => {
+  const { provider, dir } = makeProvider()
+  const model = provider.languageModel("Auto")
+  const record = join(dir, "record.json")
+  await withFakeEnv({ FAKE_QODER_MODE: "bridge-stream", FAKE_QODER_RECORD: record }, async () => {
+    const { stream } = await model.doStream({
+      prompt: PROMPT,
+      providerOptions: { qodercn: { settings: { reasoningEffort: "xhigh" } } },
+    })
+    for await (const _ of stream as unknown as AsyncIterable<any>) {
+      // 排空
+    }
+  })
+  const argv = (JSON.parse(readFileSync(record, "utf8")) as { argv: string[] }).argv
+  assert.equal(argv[argv.indexOf("--reasoning-effort") + 1], "xhigh")
 })

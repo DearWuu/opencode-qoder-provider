@@ -6,7 +6,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 
-import { creditsPanelLines, formatCredits, formatQuotaNumber, formatRelativeTime, panelFooterLines } from "../src/credits.mjs"
+import { creditsPanelLines, formatCredits, formatQuotaNumber, formatRelativeTime, panelFooterLines, quotaAmountText } from "../src/credits.mjs"
 
 const STATS = {
   provider: "qoder",
@@ -53,6 +53,14 @@ test("official quota numbers use thousands separators", () => {
   assert.equal(formatQuotaNumber(3128), "3,128")
 })
 
+test("quotaAmountText is the single amount format for labeled and unlabeled lines", () => {
+  assert.equal(quotaAmountText({ used: 6872, total: 10000, percentage: 69 }), "6,872 / 10,000（69%）")
+  assert.equal(quotaAmountText({ used: 4, total: 570, percentage: 1, label: "个人" }), "个人 4 / 570（1%）")
+  assert.equal(quotaAmountText({ used: 0, total: 5000, percentage: 0, label: "共享资源包" }), "共享资源包 0 / 5,000（0%）")
+  assert.equal(quotaAmountText({ used: 4, total: 570, percentage: 1, label: "" }), "4 / 570（1%）")
+  assert.equal(quotaAmountText({ used: 0, total: 0, percentage: 0 }), "0 / 0（0%）")
+})
+
 test("formatRelativeTime renders compact ages", () => {
   assert.equal(formatRelativeTime("", NOW_MS), "no calls")
   assert.equal(formatRelativeTime("garbage", NOW_MS), "no calls")
@@ -65,8 +73,53 @@ test("the panel renders Today and the two real official quota lines", () => {
   const lines = creditsPanelLines({ stats: STATS, quota: QUOTA, error: undefined, nowMs: NOW_MS })
   assert.deepEqual(lines, [
     { tone: "muted", text: "Today 1.23" },
-    { tone: "muted", text: "6,872 / 10,000（已使用 69%）" },
+    { tone: "muted", text: "6,872 / 10,000（69%）" },
     { tone: "muted", text: "剩余 3,128 · 距离重置还有 10 天" },
+  ])
+})
+
+test("multiple official quotas render one labeled line each, reset line names the primary quota", () => {
+  const multi = {
+    ...QUOTA,
+    used: 4,
+    total: 570,
+    remaining: 566,
+    percentage: 1,
+    quotas: [
+      { label: "PlanCreditsUsed", name: "个人", used: 4, total: 570, remaining: 566, percentage: 1 },
+      { label: "OrgResourcePackage", name: "共享资源包", used: 0, total: 5000, remaining: 5000, percentage: 0 },
+    ],
+  }
+  const lines = creditsPanelLines({ stats: STATS, quota: multi, error: undefined, nowMs: NOW_MS })
+  assert.deepEqual(lines, [
+    { tone: "muted", text: "Today 1.23" },
+    { tone: "muted", text: "个人 4 / 570（1%）" },
+    { tone: "muted", text: "共享资源包 0 / 5,000（0%）" },
+    { tone: "muted", text: "剩余（个人）566 · 距离重置还有 10 天" },
+  ])
+})
+
+test("a single-entry quotas array keeps the unlabeled one-line format", () => {
+  const single = { ...QUOTA, quotas: [{ label: "OrgResourcePackage", name: "共享资源包", used: 6872, total: 10000, remaining: 3128, percentage: 69 }] }
+  const lines = creditsPanelLines({ stats: STATS, quota: single, error: undefined, nowMs: NOW_MS })
+  assert.equal(lines[1].text, "6,872 / 10,000（69%）")
+  assert.equal(lines[2].text, "剩余 3,128 · 距离重置还有 10 天")
+})
+
+test("the reset line labels whichever quota pool is the primary entry", () => {
+  const cn = {
+    ...QUOTA,
+    quotas: [
+      { label: "OrgResourcePackage", name: "共享资源包", used: 6872, total: 10000, remaining: 3128, percentage: 69 },
+      { label: "PlanCreditsUsed", name: "个人", used: 100, total: 500, remaining: 400, percentage: 20 },
+    ],
+  }
+  const lines = creditsPanelLines({ stats: STATS, quota: cn, error: undefined, nowMs: NOW_MS })
+  assert.deepEqual(lines.map((line) => line.text), [
+    "Today 1.23",
+    "共享资源包 6,872 / 10,000（69%）",
+    "个人 100 / 500（20%）",
+    "剩余（共享资源包）3,128 · 距离重置还有 10 天",
   ])
 })
 

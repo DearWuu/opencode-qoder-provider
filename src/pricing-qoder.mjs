@@ -7,6 +7,10 @@
  * CLI 的 `--list-models` 会先解密模型目录再打印；捕获 hook 包装 JSON.parse 取得同一份明文，
  * 因此不额外请求账户接口、不运行模型。任何失败（未登录、超时、形状不符、未捕获）都返回 null，
  * 不抛错、不编造数据，由面板隐藏倍率段并保留上一份成功快照。
+ *
+ * 首次提取可能赶在 CLI 冷启动（自举、令牌刷新）中间而拿不到目录，因此在提取层做有界重试：
+ * 最多 3 次尝试、间隔 1.5 秒、整条链路总时长不超过 60 秒；重试仍失败才诚实降级为 null。
+ * 重试放在提取层（而不是快照缓存层），注入的 fetchPricing 与单测 fake 不会被额外等待。
  */
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -19,6 +23,13 @@ import { cliCommandName } from "./variants.mjs"
 
 /** 快照的 source 文案（CN 变体默认值）：说明数据来自目录明文的捕获，而不是账户 HTTP API。 */
 export const PRICING_SOURCE = "qoderclicn --list-models + JSON.parse capture hook (catalog plaintext)"
+
+/** 一次提取最多尝试的次数（含首次）：首次 + 2 次重试。 */
+export const PRICING_MAX_ATTEMPTS = 3
+/** 两次尝试之间的等待：1.5 秒，留给 CLI 冷启动自举与令牌刷新。 */
+export const PRICING_RETRY_DELAY_MS = 1_500
+/** 一条提取链路的尝试总时长预算：超出后不再重试，直接降级。 */
+export const PRICING_RETRY_BUDGET_MS = 60_000
 
 const CAPTURE_DIR_ENV = "QODER_PRICING_CAPTURE_DIR"
 const CAPTURE_HOOK_PATH = fileURLToPath(new URL("./pricing-capture.mjs", import.meta.url))
@@ -51,17 +62,53 @@ export function buildNodeOptions(existing, hookUrl = pathToFileURL(CAPTURE_HOOK_
 }
 
 /**
- * 插件默认的倍率抓取器：调用 CLI 提取；任何失败返回 null。
+ * 插件默认的倍率抓取器：调用 CLI 提取；冷启动首拍拿不到目录时在预算内补试。
  *
- * @param {{ cliPath?: string, cwd?: string, timeoutMs?: number, env?: Record<string, string|undefined>, now?: () => number }} [options]
+ * @param {{ cliPath?: string, cwd?: string, timeoutMs?: number, env?: Record<string, string|undefined>, now?: () => number, maxAttempts?: number, retryDelayMs?: number, retryBudgetMs?: number, sleep?: (ms: number) => Promise<void> }} [options]
  * @returns {Promise<object|null>}
  */
 export async function fetchPricingFromQoder(options = {}) {
-  return extractPricing(options)
+  return withColdStartRetry(() => extractPricing(options), options)
+}
+
+/**
+ * 在总时长预算内重试一次提取；任何一次拿到快照即返回。
+ *
+ * 失败时一律返回 null：不构造快照、不补 fetchedAt、不编造倍率，由调用方保留上一份成功快照，
+ * 或在没有旧快照时隐藏倍率段。首次成功后立即返回，不会为了「更稳」额外 spawn 一次 CLI。
+ *
+ * 调用方：fetchPricingFromQoder（index.ts 把这些选项从插件配置透传到该提取器）。
+ *
+ * @param {() => Promise<object|null>} attempt 单次提取。
+ * @param {{ maxAttempts?: number, retryDelayMs?: number, retryBudgetMs?: number, now?: () => number, sleep?: (ms: number) => Promise<void> }} [options]
+ * @returns {Promise<object|null>}
+ */
+export async function withColdStartRetry(attempt, options = {}) {
+  const {
+    maxAttempts = PRICING_MAX_ATTEMPTS,
+    retryDelayMs = PRICING_RETRY_DELAY_MS,
+    retryBudgetMs = PRICING_RETRY_BUDGET_MS,
+    now = Date.now,
+    sleep = defaultSleep,
+  } = options
+  const attempts = Number.isInteger(maxAttempts) && maxAttempts > 0 ? maxAttempts : 1
+  const startedAt = now()
+  for (let index = 1; index <= attempts; index += 1) {
+    const snapshot = await attempt()
+    if (snapshot) return snapshot
+    if (index >= attempts) break
+    // 剩余预算放不下下一次等待就放弃，避免一条读取链路拖过预算。
+    if (now() - startedAt + retryDelayMs >= retryBudgetMs) break
+    await sleep(retryDelayMs)
+  }
+  return null
 }
 
 /**
  * spawn `--list-models`，从捕获目录读取明文模型目录并映射为定价快照。
+ *
+ * 这是单次尝试：不含重试与等待，重试由 fetchPricingFromQoder 的 withColdStartRetry 负责，
+ * 因此单测可以直接验证首次失败/成功的行为而不被额外延迟影响。
  *
  * @param {{ cliPath?: string, cwd?: string, timeoutMs?: number, env?: Record<string, string|undefined>, now?: () => number }} [options]
  * @returns {Promise<object|null>}
@@ -195,6 +242,11 @@ function pickText(value) {
     if (typeof value.en === "string" && value.en.length > 0) return value.en
   }
   return undefined
+}
+
+/** 默认等待实现；测试注入同步 resolve 的 sleep 以免真的等 1.5 秒。 */
+function defaultSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /** 按文件序号读取捕获；坏文件直接跳过。 */

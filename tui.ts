@@ -42,6 +42,9 @@ export const QoderTuiPlugin = Plugin.define({
     }))
 
     context.ui.slot({
+      // 沉底靠配置：sidebar.content 内各面板按插件启用顺序排列，opencode.jsonc 的
+      // plugins 数组把本插件放最后即沉底。不可改用 sidebar.footer——那是滚动区外的
+      // 固定边界，会截断侧边栏滚动。
       append: "sidebar.content",
       render: () =>
         QoderCreditsPanel({

@@ -188,7 +188,7 @@ test("the plugin registers both variant providers with the aisdk package", async
   assert.equal(intl.info.package, `aisdk:file://${expected}`)
 })
 
-test("the plugin registers the discovered models of each variant with text only capabilities", async () => {
+test("the plugin registers the discovered models of each variant with text and image capabilities", async () => {
   const harness = createHarness()
   await QoderProviderPlugin.setup(harness.ctx as never)
 
@@ -199,7 +199,12 @@ test("the plugin registers the discovered models of each variant with text only 
   )
   assert.equal(cnModels[0].modelID, "Auto")
   assert.equal(cnModels[0].providerID, "qodercn")
-  assert.deepEqual(cnModels[0].capabilities, { tools: false, input: ["text"], output: ["text"] })
+  assert.deepEqual(cnModels[0].capabilities, {
+    tools: true,
+    input: ["text", "image"],
+    output: ["text"],
+    reasoning: { supported: true, effort: ["none", "low", "medium", "high", "xhigh", "max"] },
+  })
   assert.deepEqual(cnModels[0].limit, { context: 200_000, output: 32_000 })
   assert.deepEqual(cnModels[0].cost, [])
   assert.equal(cnModels[0].package, harness.providerAdds[0].info.package)
@@ -642,4 +647,19 @@ test("/qoder refresh never lets a stale slow discovery overwrite the newer catal
   const text = harness.synthetic[harness.synthetic.length - 1]!.text as string
   assert.match(text, /qodercn\/fast-two/)
   assert.equal(/slow-one/.test(text), false)
+})
+
+test("every model registers the reasoning effort variants and capabilities", async () => {
+  const harness = createHarness()
+  await QoderProviderPlugin.setup(harness.ctx as never)
+
+  const expectations = ["none", "low", "medium", "high", "xhigh", "max"]
+  for (const added of harness.providerAdds) {
+    for (const model of added.models) {
+      assert.deepEqual(model.capabilities.reasoning, { supported: true, effort: expectations })
+      assert.deepEqual(model.variants.map((variant: any) => variant.id), expectations)
+      assert.deepEqual(model.variants[0], { id: "none", name: "None", settings: { reasoningEffort: "none" } })
+      assert.deepEqual(model.variants[5], { id: "max", name: "Max", settings: { reasoningEffort: "max" } })
+    }
+  }
 })

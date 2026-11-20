@@ -12,6 +12,7 @@
  *  - FAKE_QODER_PID_FILE      path of the file that receives the process pid
  *  - FAKE_QODER_MODE          ok | error | usage-auto | fallback | fallback-quoted |
  *                             hang | heartbeat | slow | partial | partial-no-result | partial-empty |
+ *                             bridge | bridge-stream | native-tool |
  *                             huge-out | huge-err | not-json | crash
  *  - FAKE_QODER_MODELS        newline separated model list for --list-models
  *  - FAKE_QODER_DISCOVERY_DELAY_MS  ms to wait before answering --list-models
@@ -54,6 +55,25 @@ function record(payload) {
   writeFileSync(file, JSON.stringify(payload, null, 2))
 }
 
+/**
+ * Read every `--attachment <path>` file the provider materialized, so tests can
+ * assert both the argv wiring and the exact bytes on disk. `readable: false`
+ * records a path the CLI could not open.
+ */
+function readAttachments() {
+  const out = []
+  for (let index = 0; index < argv.length; index++) {
+    if (argv[index] !== "--attachment") continue
+    const path = argv[index + 1]
+    try {
+      out.push({ path, base64: readFileSync(path).toString("base64") })
+    } catch {
+      out.push({ path, error: "unreadable" })
+    }
+  }
+  return out
+}
+
 /** Write exactly `bytes` padding to stdout (fd 1) or stderr (fd 2), honouring backpressure. */
 async function fill(stream, bytes, char = "x") {
   const chunk = Buffer.alloc(Math.min(bytes, 64 * 1024), char)
@@ -80,11 +100,19 @@ function positiveNumberEnv(name) {
   return Number.isFinite(value) && value > 0 ? value : 0
 }
 
+/** `bridge` 模式的默认回答：信封外的正文 + 两个工具调用信封 + 尾随正文。 */
+export const DEFAULT_BRIDGE_TEXT = [
+  "Let me check.",
+  '<tool_call>{"name":"bash","arguments":{"command":"ls"}}</tool_call><tool_call>{"name":"read","arguments":{"filePath":"a.txt"}}</tool_call>',
+  "Done.",
+].join("\n")
+
 function resultPayload(requested) {
   const actual = ["usage-auto", "fallback", "fallback-quoted"].includes(mode) ? "auto" : requested.toLowerCase()
   const tokens = process.env.FAKE_QODER_ZERO_USAGE ? 0 : 10
   const outTokens = process.env.FAKE_QODER_ZERO_USAGE ? 0 : 5
   const ratio = positiveNumberEnv("FAKE_QODER_CONTEXT_RATIO")
+  const defaultText = mode === "bridge" ? DEFAULT_BRIDGE_TEXT : `ok: ${requested}`
   const usage = {
     input_tokens: tokens,
     output_tokens: outTokens,
@@ -127,7 +155,7 @@ function resultPayload(requested) {
     duration_api_ms: 40,
     is_error: mode === "error",
     num_turns: 1,
-    result: mode === "error" ? "Qoder run failed" : (process.env.FAKE_QODER_RESULT_TEXT ?? `ok: ${requested}`),
+    result: mode === "error" ? "Qoder run failed" : (process.env.FAKE_QODER_RESULT_TEXT ?? defaultText),
     stop_reason: process.env.FAKE_QODER_STOP_REASON ?? "end_turn",
     total_cost_usd: 0,
     total_credits: 0.25,
@@ -158,6 +186,59 @@ function streamJsonLines(requested) {
     { type: "stream_event", event: { type: "content_block_stop", index: 1 } },
     { type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } },
   ]
+  return lines
+}
+
+/**
+ * `native-tool` transcript: the model bypasses the text protocol and emits a
+ * native `tool_use` block (default `mcp_call`, with an `mcp__get_weather`
+ * target), then the CLI error turn and an apology — mirroring what the real
+ * CLI does when no MCP server offers the tool.
+ */
+function nativeToolLines() {
+  const name = process.env.FAKE_QODER_NATIVE_NAME ?? "mcp_call"
+  const input = process.env.FAKE_QODER_NATIVE_INPUT
+    ?? '{"toolName":"mcp__get_weather","arguments":{"city":"Hangzhou"}}'
+  const chunks = [input.slice(0, 9), input.slice(9, 22), input.slice(22)].filter((chunk) => chunk.length > 0)
+  const lines = [
+    { type: "system", subtype: "init", session_id: "fake-session" },
+    { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "thinking" } } },
+    { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "use the native tool" } } },
+    { type: "stream_event", event: { type: "content_block_stop", index: 0 } },
+    { type: "stream_event", event: { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "call_native_1", name, input: {} } } },
+  ]
+  for (const chunk of chunks) {
+    lines.push({ type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: chunk } } })
+  }
+  lines.push({ type: "stream_event", event: { type: "content_block_stop", index: 1 } })
+  lines.push({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text" } } })
+  lines.push({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "The native call failed." } } })
+  lines.push({ type: "stream_event", event: { type: "content_block_stop", index: 0 } })
+  return lines
+}
+
+/**
+ * `bridge-stream` transcript: one text block whose deltas split a `<tool_call>`
+ * envelope across boundaries, with visible text before and after it.
+ */
+function bridgeStreamLines() {
+  const text = process.env.FAKE_QODER_RESULT_TEXT
+    ?? 'Before <tool_call>{"name":"bash","arguments":{"command":"ls"}}</tool_call> after'
+  const chunks = [
+    text.slice(0, 7),
+    text.slice(7, 24),
+    text.slice(24, 40),
+    text.slice(40, 60),
+    text.slice(60),
+  ].filter((chunk) => chunk.length > 0)
+  const lines = [
+    { type: "system", subtype: "init", session_id: "fake-session" },
+    { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text" } } },
+  ]
+  for (const chunk of chunks) {
+    lines.push({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: chunk } } })
+  }
+  lines.push({ type: "stream_event", event: { type: "content_block_stop", index: 0 } })
   return lines
 }
 
@@ -229,7 +310,7 @@ if (argv.includes("--list-models")) {
     stdin += chunk
   })
   process.stdin.on("end", () => {
-    record({ argv, stdin, stdinBytes: Buffer.byteLength(stdin, "utf8") })
+    record({ argv, stdin, stdinBytes: Buffer.byteLength(stdin, "utf8"), attachments: readAttachments() })
 
     if (mode === "hang") {
       spawnTrackedChild()
@@ -256,6 +337,28 @@ if (argv.includes("--list-models")) {
     if (mode === "partial-empty") {
       void (async () => {
         for (const line of emptyTextLines(argValue("--model") ?? "Auto")) {
+          process.stdout.write(`${JSON.stringify(line)}\n`)
+        }
+        process.stdout.write(`${JSON.stringify(resultPayload(argValue("--model") ?? "Auto"))}\n`)
+        await flush(process.stdout)
+        process.exit(0)
+      })()
+      return
+    }
+    if (mode === "native-tool") {
+      void (async () => {
+        for (const line of nativeToolLines()) {
+          process.stdout.write(`${JSON.stringify(line)}\n`)
+        }
+        process.stdout.write(`${JSON.stringify(resultPayload(argValue("--model") ?? "Auto"))}\n`)
+        await flush(process.stdout)
+        process.exit(0)
+      })()
+      return
+    }
+    if (mode === "bridge-stream") {
+      void (async () => {
+        for (const line of bridgeStreamLines()) {
           process.stdout.write(`${JSON.stringify(line)}\n`)
         }
         process.stdout.write(`${JSON.stringify(resultPayload(argValue("--model") ?? "Auto"))}\n`)

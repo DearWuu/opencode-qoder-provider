@@ -1,6 +1,6 @@
 {
   "name": "opencode-qoder-provider",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "OpenCode provider plugin that routes model calls to the Qoder CLI (provider: Qoder (Credits)).",
   "license": "MIT",
   "repository": {
@@ -30,7 +30,7 @@
     "check:catalog": "node scripts/check-real-catalog.mjs"
   },
   "dependencies": {
-    "@qodercn-ai/qoderclicn": "1.1.85",
+    "@qodercn-ai/qoderclicn": "1.1.90",
     "node-pty": "^1.1.0"
   },
   "devDependencies": {

@@ -63,12 +63,15 @@ export function appendCallLog(file, entry) {
  * @param {boolean} [entry.sawStderr]
  * @param {boolean} [entry.sawTextDelta]
  * @param {boolean} [entry.sawResult]
+ * @param {boolean} [entry.bridge]
+ * @param {number} [entry.toolCalls]
+ * @param {string} [entry.reasoningEffort] 实际传给 CLI `--reasoning-effort` 的档位；`auto`/未传时缺省。
  * @returns {Record<string, any>}
  */
 export function buildLogEntry({
   variant, provider, requestedModel, actualModel, usageModelKey, usageModelKeys, credits, durationMs, isError, exitCode,
   sessionId, timedOut, aborted, modelFallback, timeoutKind, lastEventType, lastEventAgoMs,
-  sawStdout, sawStderr, sawTextDelta, sawResult,
+  sawStdout, sawStderr, sawTextDelta, sawResult, bridge, toolCalls, reasoningEffort,
 }) {
   const entry = {
     ts: new Date().toISOString(),
@@ -93,6 +96,9 @@ export function buildLogEntry({
     sawStderr,
     sawTextDelta,
     sawResult,
+    bridge,
+    toolCalls,
+    reasoningEffort,
   }
   for (const key of Object.keys(entry)) {
     if (entry[key] === undefined) delete entry[key]

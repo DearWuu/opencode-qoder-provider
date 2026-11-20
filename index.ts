@@ -305,6 +305,12 @@ function buildProviderInfo(providerPackage: string, providerId: string, provider
   } as unknown as Provider.Info
 }
 
+/**
+ * Qoder CLI 真实思考强度枚举里作为模型变体展示的子集：
+ * `auto` 是默认值（不传 flag），`ultracode` 默认不展示。
+ */
+const REASONING_EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"] as const
+
 function buildModelInfos(catalog: CatalogEntry[], providerPackage: string, contextLimit: number, providerId: string): Model.Info[] {
   return catalog.map((entry) => ({
     id: entry.id,
@@ -312,8 +318,20 @@ function buildModelInfos(catalog: CatalogEntry[], providerPackage: string, conte
     providerID: providerId,
     name: entry.name,
     package: providerPackage,
-    capabilities: { tools: false, input: ["text"], output: ["text"] },
-    variants: [],
+    // 工具桥接：宿主的 function 工具经 `--append-system-prompt` 注入的文本协议交给模型，
+    // 模型用 `<tool_call>` 信封回复，provider 再翻译成 AI SDK tool-call part。
+    // 桥接要求宿主把工具清单传进来；provider 自定义工具（type: "provider"）不支持。
+    capabilities: {
+      tools: true,
+      input: ["text", "image"],
+      output: ["text"],
+      reasoning: { supported: true, effort: [...REASONING_EFFORTS] },
+    },
+    variants: REASONING_EFFORTS.map((effort) => ({
+      id: effort,
+      name: effort[0]!.toUpperCase() + effort.slice(1),
+      settings: { reasoningEffort: effort },
+    })),
     time: { released: 0 },
     cost: [],
     status: "active",

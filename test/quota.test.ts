@@ -71,6 +71,86 @@ test("inconsistent credit values return unavailable", () => {
   const quota = parseOfficialQuota(RECORDED.replace("6872/10000", "10001/10000"), { now: NOW })
   assert.equal(quota.available, false)
   assert.match(quota.error, /inconsistent/)
+  assert.deepEqual(quota.quotas, [])
+})
+
+test("all numeric quotas on one screen are collected with display names, never summed", () => {
+  // 真实屏（2026-11-16 取证）：海外 Teams 同时给出 PlanCreditsUsed:4/570 与 OrgResourcePackage:0/5000。
+  const output = RECORDED.replace("PlanCreditsUsed:N/A", "PlanCreditsUsed:4/570")
+
+  const intl = parseOfficialQuota(output, {
+    now: NOW,
+    labels: ["PlanCreditsUsed", "OrgResourcePackage", "Add-onCreditsUsed"],
+  })
+  assert.deepEqual(intl.quotas, [
+    { label: "PlanCreditsUsed", name: "个人", used: 4, total: 570, remaining: 566, percentage: 1 },
+    { label: "OrgResourcePackage", name: "共享资源包", used: 6872, total: 10000, remaining: 3128, percentage: 69 },
+  ])
+
+  const cn = parseOfficialQuota(output, { now: NOW })
+  assert.deepEqual(cn.quotas.map((entry) => entry.label), ["OrgResourcePackage", "PlanCreditsUsed"])
+  assert.equal(cn.quotas[0].name, "共享资源包")
+})
+
+test("a single numeric quota keeps one unlabeled entry; N/A labels are skipped", () => {
+  const quota = parseOfficialQuota(RECORDED, { now: NOW })
+  assert.deepEqual(quota.quotas, [
+    { label: "OrgResourcePackage", name: "共享资源包", used: 6872, total: 10000, remaining: 3128, percentage: 69 },
+  ])
+})
+
+test("an inconsistent preferred label falls back to the next valid quota instead of going unavailable", () => {
+  const output = RECORDED
+    .replace("PlanCreditsUsed:N/A", "PlanCreditsUsed:4/570")
+    .replace("OrgResourcePackage:6872/10000", "OrgResourcePackage:0/0")
+
+  const quota = parseOfficialQuota(output, {
+    now: NOW,
+    labels: ["OrgResourcePackage", "PlanCreditsUsed", "Add-onCreditsUsed"],
+  })
+  assert.equal(quota.available, true)
+  assert.equal(quota.used, 4)
+  assert.equal(quota.total, 570)
+  assert.equal(quota.remaining, 566)
+  assert.equal(quota.percentage, 1)
+  assert.deepEqual(quota.quotas, [
+    { label: "PlanCreditsUsed", name: "个人", used: 4, total: 570, remaining: 566, percentage: 1 },
+  ])
+})
+
+test("inconsistent single entries are skipped one by one, matching the primary-quota rule", () => {
+  for (const bad of ["0/0", "600/570", "6872/0"]) {
+    const output = RECORDED
+      .replace("PlanCreditsUsed:N/A", "PlanCreditsUsed:4/570")
+      .replace("OrgResourcePackage:6872/10000", `OrgResourcePackage:${bad}`)
+    const quota = parseOfficialQuota(output, { now: NOW, labels: ["OrgResourcePackage", "PlanCreditsUsed"] })
+    assert.equal(quota.available, true)
+    assert.deepEqual(quota.quotas.map((entry) => entry.label), ["PlanCreditsUsed"])
+  }
+})
+
+test("unknown quota labels get a readable fallback name instead of the raw English key", () => {
+  const output = RECORDED.replace("Add-onCreditsUsed:N/A", "SomeNewPackage:5/100")
+  const quota = parseOfficialQuota(output, { now: NOW, labels: ["SomeNewPackage", "OrgResourcePackage", "PlanCreditsUsed"] })
+  assert.equal(quota.available, true)
+  assert.equal(quota.used, 5)
+  assert.equal(quota.total, 100)
+  assert.deepEqual(quota.quotas.map((entry) => entry.name), ["其他额度", "共享资源包"])
+})
+
+test("status text lists every quota with its label when several are present", () => {
+  const output = RECORDED.replace("PlanCreditsUsed:N/A", "PlanCreditsUsed:4/570")
+  const intl = parseOfficialQuota(output, {
+    now: NOW,
+    labels: ["PlanCreditsUsed", "OrgResourcePackage", "Add-onCreditsUsed"],
+  })
+  const status = formatQuotaStatus(intl)
+  assert.match(status, /- Quota（个人）: 4 \/ 570 used \(1%\); 566 remaining/)
+  assert.match(status, /- Quota（共享资源包）: 6,872 \/ 10,000 used \(69%\); 3,128 remaining/)
+  assert.match(status, /- Quota expires: 2026-11-19T16:00:00\.000Z/)
+
+  const single = formatQuotaStatus(parseOfficialQuota(RECORDED, { now: NOW }))
+  assert.match(single, /- Quota: 6,872 \/ 10,000 used \(69%\); 3,128 remaining; expires /)
 })
 
 test("quota reads are single-flight and cached in memory for five minutes", async () => {

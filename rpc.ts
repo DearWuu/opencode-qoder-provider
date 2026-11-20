@@ -108,6 +108,22 @@ export const QoderRpc = Rpc.define({
           fetchedAt: { type: "string" },
           cached: { type: "boolean" },
           error: { type: "string" },
+          quotas: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                label: { type: "string" },
+                name: { type: "string" },
+                used: { type: "number" },
+                total: { type: "number" },
+                remaining: { type: "number" },
+                percentage: { type: "integer" },
+              },
+              required: ["label", "name", "used", "total", "remaining", "percentage"],
+              additionalProperties: false,
+            },
+          },
         },
         required: [
           "available",
@@ -214,6 +230,16 @@ export interface QoderStatsOutput {
   lastError: boolean
 }
 
+/** 同屏单个数值额度（个人/共享资源包/加量包）；多额度时 quotas 逐条给出，绝不相加。 */
+export interface QoderQuotaEntry {
+  label: string
+  name: string
+  used: number
+  total: number
+  remaining: number
+  percentage: number
+}
+
 /** `quota` 方法的返回值；available=false 时数值字段仅为占位，UI 不得展示为额度。 */
 export interface QoderQuotaOutput {
   available: boolean
@@ -226,6 +252,8 @@ export interface QoderQuotaOutput {
   fetchedAt: string
   cached: boolean
   error: string
+  /** 同屏全部数值额度（按变体标签优先级排序）；可选，缺省按单额度处理。 */
+  quotas?: QoderQuotaEntry[]
 }
 
 /** 单个模型的促销态；与定价快照契约一致（不得增删字段）。 */

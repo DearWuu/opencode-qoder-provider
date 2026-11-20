@@ -1,11 +1,20 @@
 /**
- * 文件职责：把 AI SDK V3 prompt 拍平成纯文本，并做 UTF-8 字节上限校验与媒体类型报错。
+ * 文件职责：把 AI SDK V3 prompt 拍平成纯文本，收集图片附件，并做 UTF-8 字节上限校验与媒体类型报错。
  * 上游：src/provider 的 doGenerate/doStream。
- * 下游：src/options（stdin/安全上限常量）。
+ * 下游：src/options（stdin/安全上限常量）、src/cli（把附件落成临时文件后传 `--attachment`）。
  */
 import { CLI_STDIN_LIMIT_BYTES, MAX_PROMPT_BYTES } from "./options.mjs"
 
 const encoder = new TextEncoder()
+
+export const OUTPUT_CONSTRAINT = [
+  "# Visible output constraints",
+  "Visible text must contain only the answer or deliverable the user requested, or a brief progress update relevant to the task.",
+  "Keep internal analysis and planning in the dedicated reasoning channel, not in visible text.",
+  "Do not simulate conversation role headers, host acknowledgements, tool receipts, or execution results.",
+  "Only the host can provide actual tool results; use the tool-call protocol when an action is needed and wait for its response.",
+  "User-requested analysis reports, explanations, quotations of protocol text, and code examples are allowed as requested content; do not present them as actual host messages or tool execution.",
+].join("\n")
 
 /** prompt 含 Qoder CLI 无法消费的媒体内容时抛出的错误。 */
 export class UnsupportedMediaError extends Error {
@@ -29,13 +38,21 @@ export class PromptTooLargeError extends Error {
 }
 
 /**
- * 把 AI SDK V3 prompt 序列化成写入 `qoderclicn` stdin 的纯文本。
+ * 把 AI SDK V3 prompt 拍平成纯文本，单独抽出 system 内容，并收集其中的图片附件。
  *
- * Qoder CLI（1.1.85）在不用 `--input-format stream-json` 时只接受原始文本 prompt，
- * 因此在这里把对话拍平。
+ * Qoder CLI（1.1.90）在不用 `--input-format stream-json` 时只接受原始文本 prompt，
+ * 因此对话文本在这里拍平；system 消息不混进用户文本，单独返回，由 provider 经
+ * `--append-system-prompt` 传给 CLI（与工具桥接协议走同一条入口）。
+ * 图片无法写进文本，改为收集成附件，由 src/cli 落成临时文件后以 `--attachment <file>` 传给 CLI。
+ *
+ * 附件顺序与 prompt 中出现的顺序一致，每项为 `{ mediaType, data }`：
+ * `data` 是 `Uint8Array` 或 base64 字符串，`mediaType` 缺失时为 `undefined`。
+ *
+ * `system` 为全部 system 消息按出现顺序以空行连接；没有 system 消息时为 `""`。
+ * user/assistant/tool 仍保留 `[user]` / `[assistant]` / `[tool]` 角色标记，出现在 `text` 里。
  *
  * @param {Array<any>} prompt
- * @returns {string}
+ * @returns {{ text: string, system: string, attachments: Array<{ mediaType: string | undefined, data: Uint8Array | string }> }}
  */
 export function serializePrompt(prompt) {
   if (!Array.isArray(prompt)) {
@@ -43,29 +60,36 @@ export function serializePrompt(prompt) {
   }
 
   const blocks = []
+  const systemBlocks = []
+  const attachments = []
   for (const message of prompt) {
     if (!message || typeof message !== "object") {
       throw new Error("Qoder provider received a malformed prompt message.")
     }
     switch (message.role) {
       case "system":
-        blocks.push(`[system]\n${String(message.content ?? "")}`)
+        systemBlocks.push(String(message.content ?? ""))
         break
       case "user":
-        blocks.push(`[user]\n${renderParts(message.content, "user")}`)
+        blocks.push(`[user]\n${renderParts(message.content, "user", attachments)}`)
         break
-      case "assistant":
-        blocks.push(`[assistant]\n${renderParts(message.content, "assistant")}`)
+      case "assistant": {
+        const content = Array.isArray(message.content)
+          ? message.content.filter((part) => part?.type !== "reasoning")
+          : message.content
+        if (Array.isArray(content) && content.length === 0 && message.content.length > 0) break
+        blocks.push(`[assistant]\n${renderParts(content, "assistant", attachments)}`)
         break
+      }
       case "tool":
-        blocks.push(`[tool]\n${renderParts(message.content, "tool")}`)
+        blocks.push(`[tool]\n${renderParts(message.content, "tool", attachments)}`)
         break
       default:
         throw new Error(`Qoder provider does not support the prompt role "${message.role}".`)
     }
   }
 
-  return blocks.join("\n\n")
+  return { text: blocks.join("\n\n"), system: systemBlocks.join("\n\n"), attachments }
 }
 
 /** 序列化后 prompt 的 UTF-8 字节数。
@@ -93,7 +117,7 @@ export function assertPromptSize(text, limit = MAX_PROMPT_BYTES) {
   return bytes
 }
 
-function renderParts(parts, role) {
+function renderParts(parts, role, attachments) {
   if (typeof parts === "string") return parts
   if (!Array.isArray(parts)) return ""
 
@@ -108,10 +132,12 @@ function renderParts(parts, role) {
         rendered.push(`[reasoning]\n${String(part.text ?? "")}`)
         break
       case "tool-call":
-        rendered.push(`[tool-call] ${part.toolName ?? "unknown"} (${part.toolCallId ?? ""})\n${safeJson(part.input)}`)
+        // 与工具桥接协议一致：宿主历史里的工具调用以 `<tool_call>` 信封回放，
+        // 让模型看到自己上一轮发出的调用。
+        rendered.push(renderToolCall(part))
         break
       case "tool-result":
-        rendered.push(`[tool-result] ${part.toolName ?? "unknown"} (${part.toolCallId ?? ""})\n${renderToolOutput(part.output)}`)
+        rendered.push(`[tool-result] ${part.toolName ?? "unknown"} (${part.toolCallId ?? ""})\n${renderToolOutput(part.output, attachments)}`)
         break
       case "tool-approval-response":
         rendered.push(
@@ -120,25 +146,66 @@ function renderParts(parts, role) {
           }`,
         )
         break
+      case "image":
+        attachments.push(toAttachment(part, role))
+        break
       case "file":
-        throw new UnsupportedMediaError(
-          `Qoder provider supports text input only, but a ${role} message contains a file part (${part.mediaType ?? "unknown"}).`,
-        )
-      default:
-        if (part.type === "image") {
+        if (!isImageMediaType(part.mediaType)) {
           throw new UnsupportedMediaError(
-            `Qoder provider supports text input only, but a ${role} message contains an image part (${part.mediaType ?? "unknown"}).`,
+            `Qoder provider supports text and image input only, but a ${role} message contains a file part (${part.mediaType ?? "unknown"}).`,
           )
         }
+        attachments.push(toAttachment(part, role))
+        break
+      default:
         throw new UnsupportedMediaError(
-          `Qoder provider supports text input only, but a ${role} message contains an unsupported part of type "${part.type}".`,
+          `Qoder provider supports text and image input only, but a ${role} message contains an unsupported part of type "${part.type}".`,
         )
     }
   }
   return rendered.join("\n")
 }
 
-function renderToolOutput(output) {
+function isImageMediaType(mediaType) {
+  return typeof mediaType === "string" && mediaType.trim().toLowerCase().startsWith("image/")
+}
+
+/**
+ * 把 assistant 的 tool-call part 渲染成桥接协议信封。
+ * `input` 在 AI SDK V3 里是 JSON 字符串（本 provider 产出的形状），
+ * 兼容的对象形态则直接序列化。
+ */
+function renderToolCall(part) {
+  const name = JSON.stringify(typeof part.toolName === "string" ? part.toolName : "unknown")
+  const args = typeof part.input === "string" ? part.input : safeJson(part.input) || "{}"
+  return `<tool_call>{"name":${name},"arguments":${args}}</tool_call>`
+}
+
+/**
+ * 把 image/file part 规范化为附件：`{ mediaType, data }`。
+ * image part 的载荷在 `image` 字段（AI SDK V3），file part 在 `data` 字段。
+ */
+function toAttachment(part, role) {
+  const mediaType = typeof part.mediaType === "string" && part.mediaType.trim() ? part.mediaType.trim() : undefined
+  const payload = part.type === "image" ? (part.image ?? part.data) : part.data
+  return { mediaType, data: toAttachmentData(payload, mediaType, role) }
+}
+
+function toAttachmentData(payload, mediaType, role) {
+  if (payload instanceof Uint8Array) return payload
+  if (typeof payload === "string") {
+    const base64 = payload.trim()
+    if (/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) return base64
+    throw new UnsupportedMediaError(
+      `Qoder provider supports image parts encoded as base64 data or Uint8Array, but a ${role} message contains a ${mediaType ?? "unknown"} payload of an unsupported string form.`,
+    )
+  }
+  throw new UnsupportedMediaError(
+    `Qoder provider supports image parts encoded as base64 data or Uint8Array, but a ${role} message contains a ${mediaType ?? "unknown"} payload of an unsupported type (remote URLs are not supported).`,
+  )
+}
+
+function renderToolOutput(output, attachments) {
   if (!output || typeof output !== "object") return String(output ?? "")
   switch (output.type) {
     case "text":
@@ -152,7 +219,7 @@ function renderToolOutput(output) {
     case "error-json":
       return `[error] ${safeJson(output.value)}`
     case "content":
-      return renderParts(output.value, "tool")
+      return renderParts(output.value, "tool", attachments)
     default:
       return safeJson(output)
   }

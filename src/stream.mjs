@@ -11,7 +11,8 @@ import { StringDecoder } from "node:string_decoder"
  * CLI 每行打印一个 JSON 对象：
  *  - `system` 初始化/诊断事件（忽略）
  *  - `stream_event` 包装层，内含 Anthropic 风格的原始事件
- *    （`content_block_start` / `content_block_delta` / `content_block_stop` …）
+ *    （`content_block_start` / `content_block_delta` / `content_block_stop` …，
+ *    块类型有 text / thinking / tool_use）
  *  - 一个最终的 `result` 事件，携带用量与 Credits
  *  - 一条完整的 `assistant` 消息，重复已流式输出的文本（忽略）
  *
@@ -24,6 +25,9 @@ import { StringDecoder } from "node:string_decoder"
  *   onReasoningStart?: (index: number) => void,
  *   onReasoningDelta?: (index: number, text: string) => void,
  *   onReasoningEnd?: (index: number) => void,
+ *   onToolStart?: (index: number, block: { id?: string, name?: string }) => void,
+ *   onToolDelta?: (index: number, partialJson: string) => void,
+ *   onToolEnd?: (index: number) => void,
  * }} [handlers]
  */
 export function createStreamJsonParser(handlers = {}) {
@@ -57,6 +61,7 @@ export function createStreamJsonParser(handlers = {}) {
       blockTypes.set(index, blockType)
       if (blockType === "text") handlers.onTextStart?.(index)
       else if (blockType === "thinking") handlers.onReasoningStart?.(index)
+      else if (blockType === "tool_use") handlers.onToolStart?.(index, inner.content_block ?? {})
     } else if (inner.type === "content_block_delta") {
       const delta = inner.delta
       if (!delta || typeof delta !== "object") return
@@ -65,11 +70,14 @@ export function createStreamJsonParser(handlers = {}) {
         handlers.onTextDelta?.(index, delta.text)
       } else if (delta.type === "thinking_delta" && typeof delta.thinking === "string") {
         handlers.onReasoningDelta?.(index, delta.thinking)
+      } else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
+        handlers.onToolDelta?.(index, delta.partial_json)
       }
     } else if (inner.type === "content_block_stop") {
       const blockType = blockTypes.get(index)
       if (blockType === "text") handlers.onTextEnd?.(index)
       else if (blockType === "thinking") handlers.onReasoningEnd?.(index)
+      else if (blockType === "tool_use") handlers.onToolEnd?.(index)
     }
   }
 

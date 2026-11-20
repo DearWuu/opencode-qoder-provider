@@ -4,11 +4,25 @@
  * 下游：node-pty 与 Qoder CLI；不读取/解密 token，不调用 Bearer HTTP API，不发送模型 prompt。
  */
 import { spawn } from "node:child_process"
+import { createRequire } from "node:module"
 import { existsSync } from "node:fs"
 import { delimiter, extname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import { killTree } from "./cli.mjs"
+
+// node-pty 的 conpty 助手在 Windows 下用 fork 起进程；宿主无控制台时必须隐藏新窗口。
+if (process.platform === "win32") {
+  const childProcess = createRequire(import.meta.url)("node:child_process")
+  const originalFork = childProcess.fork
+  childProcess.fork = function fork(modulePath, args, options, callback) {
+    if (typeof options === "function") {
+      callback = options
+      options = undefined
+    }
+    return originalFork.call(this, modulePath, args, { ...options, windowsHide: true }, callback)
+  }
+}
 
 export const DEFAULT_QUOTA_TIMEOUT_MS = 60_000
 const MAX_OUTPUT_CHARS = 2 * 1024 * 1024

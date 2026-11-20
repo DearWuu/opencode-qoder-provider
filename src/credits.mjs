@@ -22,6 +22,22 @@ export function formatCredits(value) {
 }
 
 /**
+ * 额度金额行的唯一写法：`6,872 / 10,000（69%）`；传 `label` 时前置标签：`个人 4 / 570（1%）`。
+ *
+ * 单额度行（不带标签）与多额度行（逐行带标签）共用本函数；不带「已使用」是为了在 37 列侧边栏内
+ * 放下最长的共享资源包行（实测 ≤34 列），README 的额度示例以本函数输出为准。
+ *
+ * 调用方：creditsPanelLines；test/credits.test.ts 直接锁定格式。
+ *
+ * @param {{ used: number, total: number, percentage: number, label?: string }} input
+ * @returns {string}
+ */
+export function quotaAmountText({ used, total, percentage, label }) {
+  const amount = `${formatQuotaNumber(used)} / ${formatQuotaNumber(total)}（${percentage}%）`
+  return label === undefined || label === "" ? amount : `${label} ${amount}`
+}
+
+/**
  * 时间戳相对 `nowMs` 的可读年龄。
  *
  * @param {string} iso 空串表示"还没有调用"
@@ -44,7 +60,9 @@ export function formatRelativeTime(iso, nowMs) {
 /**
  * Credits 面板的数据行（标题由调用方渲染）。
  *
- * Today 来自本地日志；其余两行只展示官方 `/usage` 返回的额度。
+ * Today 来自本地日志；额度行只展示官方 `/usage` 返回的额度：
+ * 单额度一行无标签，多额度（quotas）逐行带标签（个人/共享资源包/加量包），两种都走 quotaAmountText。
+ * 剩余行取主额度（`quota.remaining`）；多额度时在剩余值前加主额度标签，避免与屏上其他额度池混淆。
  * 配额不可用时不沿用旧数字，也不显示 schema 中的零值占位。
  *
  * 调用方：panel.tsx（经 createMemo 渲染面板行）。
@@ -66,8 +84,19 @@ export function creditsPanelLines(input) {
     lines.push({ tone: "muted", text: "Quota loading..." })
     return lines
   }
-  lines.push({ tone: "muted", text: `${formatQuotaNumber(quota.used)} / ${formatQuotaNumber(quota.total)}（已使用 ${quota.percentage}%）` })
-  lines.push({ tone: "muted", text: `剩余 ${formatQuotaNumber(quota.remaining)} · 距离重置还有 ${daysUntil(quota.expiresAt, input.nowMs)} 天` })
+  const entries = Array.isArray(quota.quotas) && quota.quotas.length > 1 ? quota.quotas : undefined
+  if (entries) {
+    for (const entry of entries) {
+      lines.push({ tone: "muted", text: quotaAmountText({ used: entry.used, total: entry.total, percentage: entry.percentage, label: entry.name }) })
+    }
+  } else {
+    // 只剩一条数值额度时保持无标签单行：单额度文案是既有对外口径，不为标签破坏兼容。
+    lines.push({ tone: "muted", text: quotaAmountText(quota) })
+  }
+  // 剩余值来自主额度；多额度时加标签说明是哪个额度池的剩余，单额度只保留原有分隔空格。
+  const primaryName = entries?.[0]?.name
+  const remainingLabel = primaryName ? `（${primaryName}）` : " "
+  lines.push({ tone: "muted", text: `剩余${remainingLabel}${formatQuotaNumber(quota.remaining)} · 距离重置还有 ${daysUntil(quota.expiresAt, input.nowMs)} 天` })
   return lines
 }
 

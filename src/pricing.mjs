@@ -82,11 +82,16 @@ export function formatFactor(value) {
  * @param {number} [nowMs]
  * @returns {string}
  */
-export function countdownText(target, nowMs = Date.now()) {
+export function countdownText(target, nowMs = Date.now(), compact = false) {
   const targetMs = typeof target === "number" ? (Number.isFinite(target) ? target : undefined) : parseTime(target)
   if (targetMs === undefined) return ""
   const diffMs = Math.max(0, targetMs - nowMs)
   const minutes = Math.floor(diffMs / 60_000)
+  if (compact) {
+    if (diffMs < 3_600_000) return `${minutes}分`
+    if (diffMs < 86_400_000) return `${Math.floor(diffMs / 3_600_000)}时${minutes % 60}分`
+    return `${Math.floor(diffMs / 86_400_000)}天${Math.floor((diffMs % 86_400_000) / 3_600_000)}时`
+  }
   if (diffMs < 3_600_000) return `${minutes} 分`
   if (diffMs < 86_400_000) return `${Math.floor(diffMs / 3_600_000)} 小时 ${minutes % 60} 分`
   return `${Math.floor(diffMs / 86_400_000)} 天 ${Math.floor((diffMs % 86_400_000) / 3_600_000)} 小时`
@@ -141,7 +146,7 @@ export function nextDailyWindow(hhmm, timezone, nowMs = Date.now()) {
  * @param {number} [nowMs]
  * @returns {string}
  */
-export function promotionText(model, nowMs = Date.now()) {
+export function promotionText(model, nowMs = Date.now(), compact = false) {
   const promotion = model?.promotion
   if (!promotion || typeof promotion !== "object") return ""
   const timezone = typeof promotion.timezone === "string" ? promotion.timezone : ""
@@ -150,11 +155,13 @@ export function promotionText(model, nowMs = Date.now()) {
     const restore = firstFinite(promotion.beforePromotionPriceFactor, model.originalPriceFactor)
     const endMs = nextDailyWindow(promotion.windowEnd, timezone, nowMs)
     if (endMs === undefined || restore === undefined) return ""
+    if (compact) return `低峰${countdownText(endMs, nowMs, true)}后恢复${formatFactor(restore)}`
     return `低峰 · ${countdownText(endMs, nowMs)}后恢复 ${formatFactor(restore)}`
   }
   if (promotion.active === false) {
     const startMs = nextDailyWindow(promotion.windowStart, timezone, nowMs)
     if (startMs === undefined) return ""
+    if (compact) return `${countdownText(startMs, nowMs, true)}后${promotionBadge(promotion).replace(/\s+/g, "")}`
     return `${countdownText(startMs, nowMs)}后进入${promotionBadge(promotion)}`
   }
   return ""
@@ -167,10 +174,10 @@ export function promotionText(model, nowMs = Date.now()) {
  * @param {number} [nowMs]
  * @returns {string}
  */
-export function modelPricingLine(model, nowMs = Date.now()) {
+export function modelPricingLine(model, nowMs = Date.now(), compact = false) {
   const factor = formatFactor(model?.priceFactor)
   if (!factor) return ""
-  const promotion = promotionText(model, nowMs)
+  const promotion = promotionText(model, nowMs, compact)
   return promotion ? `${factor} ${promotion}` : factor
 }
 
@@ -195,7 +202,7 @@ export function pricingPanelLines(input = {}) {
   for (const model of models) {
     const key = typeof model?.modelKey === "string" ? model.modelKey.trim() : ""
     if (!key) continue
-    const detail = modelPricingLine(model, nowMs)
+    const detail = modelPricingLine(model, nowMs, true)
     if (!detail) continue
     rows.push({ tone: "muted", text: `${key} ${detail}` })
   }

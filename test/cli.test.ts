@@ -1,9 +1,9 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { EventEmitter } from "node:events"
-import { mkdtempSync, readFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import { MAX_STDERR_BYTES, MAX_STDOUT_BYTES, buildCliArgs, killTree, parseCliResult, runCli } from "../src/cli.mjs"
@@ -74,6 +74,42 @@ test("buildCliArgs forwards maxOutputTokens only for positive integers", () => {
     assert.equal(buildCliArgs({ modelID: "Auto", maxOutputTokens: invalid as never }).includes("--max-output-tokens"), false)
   }
   assert.equal(buildCliArgs({ modelID: "Auto" }).includes("--max-output-tokens"), false)
+})
+
+test("buildCliArgs puts --append-system-prompt before --strict-mcp-config and keeps --tools last", () => {
+  const args = buildCliArgs({
+    modelID: "Auto",
+    additionalDirs: ["/extra"],
+    cliTools: ["Read"],
+    bridge: true,
+    appendSystemPrompt: "protocol",
+  })
+  assert.equal(args[args.indexOf("--append-system-prompt") + 1], "protocol")
+  const promptIndex = args.indexOf("--append-system-prompt")
+  const mcpIndex = args.indexOf("--strict-mcp-config")
+  const dirIndex = args.indexOf("--add-dir")
+  const toolsIndex = args.indexOf("--tools")
+  assert.ok(promptIndex < mcpIndex, "--append-system-prompt must come before --strict-mcp-config")
+  assert.ok(mcpIndex < dirIndex, "--strict-mcp-config must come before --add-dir")
+  assert.ok(dirIndex < toolsIndex, "--add-dir must come before the variadic --tools")
+  // 桥接模式覆盖 cliTools：内置工具一律关闭。
+  assert.deepEqual(args.slice(toolsIndex), ["--tools", ""])
+})
+
+test("buildCliArgs forwards a standalone --append-system-prompt without bridge mode", () => {
+  const args = buildCliArgs({ modelID: "Auto", appendSystemPrompt: "sys" })
+  assert.equal(args[args.indexOf("--append-system-prompt") + 1], "sys")
+  assert.equal(args.includes("--strict-mcp-config"), false)
+  assert.equal(args.includes("--tools"), false)
+
+  assert.equal(buildCliArgs({ modelID: "Auto", appendSystemPrompt: "" }).includes("--append-system-prompt"), false)
+  assert.equal(buildCliArgs({ modelID: "Auto", bridge: true }).includes("--append-system-prompt"), false)
+})
+
+test("buildCliArgs never adds --strict-mcp-config outside bridge mode", () => {
+  assert.equal(buildCliArgs({ modelID: "Auto", cliTools: "" }).includes("--strict-mcp-config"), false)
+  assert.equal(buildCliArgs({ modelID: "Auto", cliTools: ["Read"] }).includes("--strict-mcp-config"), false)
+  assert.equal(buildCliArgs({ modelID: "Auto", stream: true }).includes("--strict-mcp-config"), false)
 })
 
 test("the CLI receives the prompt as plain text on stdin", async () => {
@@ -175,22 +211,22 @@ test("stderr is truncated at exactly the 8 KiB cap and the truncation is flagged
   assert.equal(run.code, 0)
 })
 
-test("killTree on Windows runs taskkill /pid <pid> /t /f", () => {
-  const calls: Array<[string, string[]]> = []
+test("killTree on Windows runs taskkill /pid <pid> /t /f without a visible window", () => {
+  const calls: Array<[string, string[], { stdio: string, windowsHide: boolean }]> = []
   const taskkill = new EventEmitter()
   const signals: string[] = []
   const child = { pid: 4242, kill: (signal: string) => signals.push(signal) }
 
   killTree(child as never, {
     platform: "win32",
-    spawnProcess: ((command: string, args: string[]) => {
-      calls.push([command, args])
+    spawnProcess: ((command: string, args: string[], options: { stdio: string, windowsHide: boolean }) => {
+      calls.push([command, args, options])
       return taskkill
     }) as never,
   })
 
   assert.equal(calls.length, 1)
-  assert.deepEqual(calls[0], ["taskkill", ["/pid", "4242", "/t", "/f"]])
+  assert.deepEqual(calls[0], ["taskkill", ["/pid", "4242", "/t", "/f"], { stdio: "ignore", windowsHide: true }])
 
   taskkill.emit("error", new Error("taskkill is not available"))
   assert.deepEqual(signals, ["SIGKILL"])
@@ -274,4 +310,171 @@ test("runCli with collectStdout:false still detects stdout truncation", async ()
   })
   assert.equal(run.stdoutTruncated, true)
   assert.equal(run.stdout, "")
+})
+
+const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+const JPEG_BASE64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0]).toString("base64")
+
+/** 等 fake CLI 把 record 写出来（stdin 结束即写），避免在强负载下 CLI 还没启动就被超时终止。 */
+async function waitForRecord(file: string, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (existsSync(file)) return
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20))
+  }
+  throw new Error(`fake CLI did not write ${file} within ${timeoutMs}ms`)
+}
+
+test("runCli writes attachments to temp files, passes --attachment per file and removes them afterwards", async () => {
+  const dir = tempDir()
+  const record = join(dir, "record.json")
+
+  const run = await runCli({
+    cliPath: FAKE_CLI,
+    args: buildCliArgs({ modelID: "Auto", cliTools: "" }),
+    attachments: [
+      { mediaType: "image/png", data: PNG_BYTES },
+      { mediaType: "image/jpeg", data: JPEG_BASE64 },
+      { mediaType: "image/heic", data: "AAAA" },
+    ],
+    input: "describe the images",
+    cwd: dir,
+    timeoutMs: 20_000,
+    env: { ...process.env, FAKE_QODER_RECORD: record },
+  })
+
+  assert.equal(run.code, 0)
+  const recorded = JSON.parse(readFileSync(record, "utf8"))
+  assert.equal(recorded.stdin, "describe the images")
+  assert.equal(recorded.argv.filter((arg: string) => arg === "--attachment").length, 3)
+  assert.deepEqual(
+    recorded.attachments.map((attachment: { base64: string }) => attachment.base64),
+    [Buffer.from(PNG_BYTES).toString("base64"), JPEG_BASE64, "AAAA"],
+  )
+  // 扩展名按 mediaType 映射，未知图片类型退化为 .bin。
+  assert.match(recorded.attachments[0].path, /attachment-0\.png$/)
+  assert.match(recorded.attachments[1].path, /attachment-1\.jpg$/)
+  assert.match(recorded.attachments[2].path, /attachment-2\.bin$/)
+  // `--tools` 是变长参数，附件必须插在它前面，否则路径会被当成工具名。
+  assert.equal(recorded.argv.indexOf("--tools"), recorded.argv.length - 2)
+
+  // 运行结束后临时目录整体删除。
+  const attachmentDir = dirname(recorded.attachments[0].path)
+  assert.equal(existsSync(attachmentDir), false)
+  for (const attachment of recorded.attachments) {
+    assert.equal(existsSync(attachment.path), false)
+  }
+})
+
+test("runCli removes attachment temp files when the CLI fails", async () => {
+  const dir = tempDir()
+  const record = join(dir, "record.json")
+
+  const run = await runCli({
+    cliPath: FAKE_CLI,
+    args: buildCliArgs({ modelID: "Auto" }),
+    attachments: [{ mediaType: "image/png", data: PNG_BYTES }],
+    input: "describe the image",
+    cwd: dir,
+    timeoutMs: 20_000,
+    env: { ...process.env, FAKE_QODER_RECORD: record, FAKE_QODER_MODE: "crash" },
+  })
+
+  assert.equal(run.code, 1)
+  const recorded = JSON.parse(readFileSync(record, "utf8"))
+  assert.equal(recorded.attachments.length, 1)
+  assert.equal(existsSync(dirname(recorded.attachments[0].path)), false)
+})
+
+test("runCli removes attachment temp files when the call times out", async () => {
+  const dir = tempDir()
+  const record = join(dir, "record.json")
+
+  const pending = runCli({
+    cliPath: FAKE_CLI,
+    args: buildCliArgs({ modelID: "Auto" }),
+    attachments: [{ mediaType: "image/png", data: PNG_BYTES }],
+    input: "describe the image",
+    cwd: dir,
+    timeoutMs: 2_000,
+    env: { ...process.env, FAKE_QODER_RECORD: record, FAKE_QODER_MODE: "hang" },
+  })
+  await waitForRecord(record)
+  const run = await pending
+
+  assert.equal(run.timedOut, true)
+  const recorded = JSON.parse(readFileSync(record, "utf8"))
+  assert.equal(recorded.attachments.length, 1)
+  assert.equal(existsSync(dirname(recorded.attachments[0].path)), false)
+})
+
+test("runCli removes attachment temp files when the call is aborted", async () => {
+  const dir = tempDir()
+  const record = join(dir, "record.json")
+  const controller = new AbortController()
+
+  const pending = runCli({
+    cliPath: FAKE_CLI,
+    args: buildCliArgs({ modelID: "Auto" }),
+    attachments: [{ mediaType: "image/png", data: PNG_BYTES }],
+    input: "describe the image",
+    cwd: dir,
+    timeoutMs: 20_000,
+    signal: controller.signal,
+    env: { ...process.env, FAKE_QODER_RECORD: record, FAKE_QODER_MODE: "hang" },
+  })
+  setTimeout(() => controller.abort(), 800)
+  await waitForRecord(record)
+  const run = await pending
+
+  assert.equal(run.aborted, true)
+  const recorded = JSON.parse(readFileSync(record, "utf8"))
+  assert.equal(recorded.attachments.length, 1)
+  assert.equal(existsSync(dirname(recorded.attachments[0].path)), false)
+})
+
+test("runCli rejects attachment data that is neither Uint8Array nor base64", async () => {
+  await assert.rejects(
+    runCli({
+      cliPath: FAKE_CLI,
+      args: ["-p", "-o", "json"],
+      attachments: [{ mediaType: "image/png", data: 42 as never }],
+      timeoutMs: 5_000,
+    }),
+    /Uint8Array or a base64 string/,
+  )
+})
+
+test("buildCliArgs puts --reasoning-effort after --append-system-prompt and before --strict-mcp-config", () => {
+  const args = buildCliArgs({
+    modelID: "Auto",
+    bridge: true,
+    appendSystemPrompt: "sys",
+    reasoningEffort: "xhigh",
+    additionalDirs: ["/extra"],
+  })
+  const promptIndex = args.indexOf("--append-system-prompt")
+  const effortIndex = args.indexOf("--reasoning-effort")
+  const mcpIndex = args.indexOf("--strict-mcp-config")
+  const dirIndex = args.indexOf("--add-dir")
+  assert.equal(args[effortIndex + 1], "xhigh")
+  assert.ok(promptIndex < effortIndex, "--reasoning-effort must come after --append-system-prompt")
+  assert.ok(effortIndex < mcpIndex, "--reasoning-effort must come before --strict-mcp-config")
+  assert.ok(mcpIndex < dirIndex, "--strict-mcp-config must come before --add-dir")
+  assert.deepEqual(args.slice(args.indexOf("--tools")), ["--tools", ""])
+})
+
+test("buildCliArgs skips --reasoning-effort for auto, undefined and unknown values", () => {
+  for (const value of [undefined, "auto", "bogus", "", 5, null]) {
+    assert.equal(buildCliArgs({ modelID: "Auto", reasoningEffort: value as never }).includes("--reasoning-effort"), false)
+  }
+  const full = buildCliArgs({ modelID: "Auto", reasoningEffort: "max" })
+  assert.deepEqual(full.slice(-2), ["--reasoning-effort", "max"])
+  const plain = buildCliArgs({ modelID: "Auto", appendSystemPrompt: "sys", reasoningEffort: "low" })
+  assert.deepEqual(plain.slice(plain.indexOf("--append-system-prompt")), [
+    "--append-system-prompt",
+    "sys",
+    "--reasoning-effort",
+    "low",
+  ])
 })

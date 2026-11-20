@@ -1,5 +1,5 @@
 /**
- * 文件职责：provider 选项与环境变量的规范化（变体、CLI 路径、权限模式、超时、上下文窗口、日志路径、工具清单、倍率缓存与抓取超时）及默认值。
+ * 文件职责：provider 选项与环境变量的规范化（变体、CLI 路径、权限模式、超时、上下文窗口、日志路径、工具清单、工具桥接开关、倍率缓存与抓取超时）及默认值。
  * 上游：index.ts、provider.mjs、src/provider、src/catalog、scripts/check-real-catalog.mjs。
  * 下游：node:fs/os/path/url、src/pricing（倍率 TTL 与抓取超时默认值）、src/variants（变体与 CLI 解析）。
  */
@@ -49,6 +49,9 @@ export const CLI_STDIN_LIMIT_BYTES = 8388608
  */
 export const MAX_PROMPT_BYTES = 7 * 1024 * 1024
 
+/** 工具桥接默认开启：宿主传入 function 工具时按文本协议交给模型。 */
+export const DEFAULT_TOOL_BRIDGE = true
+
 /**
  * 默认 JSONL 调用日志位置，遵循 XDG_STATE_HOME。
  *
@@ -69,7 +72,7 @@ export function defaultLogFile(env = process.env) {
  *
  * @param {Record<string, any>} [raw]
  * @param {Record<string, string | undefined>} [env]
- * @returns {{ variantId: string, cliPath: string, permissionMode: string, timeoutMs: number, idleTimeoutMs: number, contextLimit: number, pricingTtlMs: number, pricingTimeoutMs: number, logFile: string, cwd: string|undefined, additionalDirs: string[], cliTools: string[]|""|undefined }}
+ * @returns {{ variantId: string, cliPath: string, permissionMode: string, timeoutMs: number, idleTimeoutMs: number, contextLimit: number, pricingTtlMs: number, pricingTimeoutMs: number, logFile: string, cwd: string|undefined, additionalDirs: string[], cliTools: string[]|""|undefined, toolBridge: boolean }}
  */
 export function resolveOptions(raw = {}, env = process.env) {
   const variantId = getVariant(raw.variant ?? raw.variantId ?? DEFAULT_VARIANT_ID).id
@@ -144,6 +147,8 @@ export function resolveOptions(raw = {}, env = process.env) {
     )
   }
 
+  const toolBridge = parseToolBridge(raw.toolBridge ?? firstString(env.QODER_TOOL_BRIDGE) ?? DEFAULT_TOOL_BRIDGE)
+
   return {
     variantId,
     cliPath,
@@ -157,7 +162,21 @@ export function resolveOptions(raw = {}, env = process.env) {
     cwd: firstString(raw.cwd),
     additionalDirs: Array.isArray(additionalDirs) ? additionalDirs.map((dir) => String(dir).trim()) : [],
     cliTools,
+    toolBridge,
   }
+}
+
+/** 工具桥接开关：接受布尔值与 true/false/1/0/on/off/yes/no 文本，非法值直接报错。 */
+function parseToolBridge(value) {
+  if (typeof value === "boolean") return value
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase()
+    if (["1", "true", "on", "yes"].includes(normalized)) return true
+    if (["0", "false", "off", "no"].includes(normalized)) return false
+  }
+  throw new Error(
+    `Invalid toolBridge "${String(value)}". Expected a boolean or one of true/false/1/0/on/off.`,
+  )
 }
 
 function firstString(value) {

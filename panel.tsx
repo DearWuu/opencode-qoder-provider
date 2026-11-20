@@ -2,9 +2,9 @@
 /**
  * 文件职责：TUI 侧边栏的 Qoder Credits 面板（@opentui/solid 组件）：CN 与海外两个变体各一段，
  * 展示本地 Today、官方 `/usage` 额度与每模型倍率。
- * 上游：tui.ts 挂载到 sidebar.content slot。
+ * 上游：tui.ts 挂载到 sidebar.content slot（沉底由 plugins 数组顺序决定，本插件排最后）。
  * 下游：src/credits.creditsPanelLines、src/pricing.pricingPanelLines、src/panel-model.createCreditsPanelController、
- *       src/poller.createStatsPoller、rpc.ts（stats/quota/pricing）、src/variants（变体清单）。
+ *       src/poller.createStatsPoller、rpc.ts（stats/quota/pricing）、src/variants（变体清单）、src/text.truncateToWidth。
  */
 import { For, createMemo, createSignal, onCleanup } from "solid-js"
 
@@ -15,8 +15,14 @@ import { pricingPanelLines } from "./src/pricing.mjs"
 import { createCreditsPanelController } from "./src/panel-model.mjs"
 import { createStatsPoller } from "./src/poller.mjs"
 import { VARIANT_IDS, getVariant } from "./src/variants.mjs"
+import { truncateToWidth } from "./src/text.mjs"
 import { QoderRpc } from "./rpc.ts"
 import type { QoderPricingOutput, QoderQuotaOutput, QoderStatsOutput } from "./rpc.ts"
+
+// DEFAULT_CONTENT_WIDTH：宿主默认侧边栏内容列数的实测值，onSizeChange 尚未上报宽度时作兜底。
+// MIN_CONTENT_WIDTH：窄侧栏保险下限——实测值比它还小不再收窄，截断口径不随极端布局继续变窄。
+const DEFAULT_CONTENT_WIDTH = 38
+const MIN_CONTENT_WIDTH = 20
 
 interface CreditsPanelProps {
   context: Context
@@ -40,8 +46,22 @@ export function QoderCreditsPanel(props: CreditsPanelProps) {
   const theme = props.context.theme
   const sections = VARIANT_IDS.map((variantId) => createVariantSection(props, variantId))
 
+  // 侧边栏宽度由宿主决定（160 列终端实测面板 37 列），逐行按显示宽度截断，
+  // 保证每行只占一行高——面板总高等于行数，滚到底就是最后一行「⟳ 刷新」。
+  // 代价：超宽行以 … 收尾丢尾字符。额度行现不带「已使用」，最长共享资源包行实测 ≤34 列
+  // （见 src/credits.mjs quotaAmountText），默认宽度下不触发截断；数值更长或侧栏更窄时才截断。
+  const [measuredWidth, setMeasuredWidth] = createSignal(0)
+  const contentWidth = () => Math.max(MIN_CONTENT_WIDTH, measuredWidth() || DEFAULT_CONTENT_WIDTH)
+
   return (
-    <box id="sidebar.qoder-credits" flexDirection="column" gap={0}>
+    <box
+      id="sidebar.qoder-credits"
+      flexDirection="column"
+      gap={0}
+      onSizeChange={function (this: any) {
+        setMeasuredWidth(this.width)
+      }}
+    >
       <For each={sections}>
         {(section, index) => (
           <>
@@ -67,7 +87,7 @@ export function QoderCreditsPanel(props: CreditsPanelProps) {
                     section.activate(line.action)
                   }}
                 >
-                  {line.text}
+                  {truncateToWidth(line.text, contentWidth())}
                 </text>
               )}
             </For>

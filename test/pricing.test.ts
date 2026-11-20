@@ -160,6 +160,14 @@ test("an upcoming promotion shows the badge verbatim without multiplying the dis
   )
 })
 
+test("compact countdown and promotion text fit the narrow sidebar without wrapping", () => {
+  assert.equal(countdownText("2026-11-11T10:59:00.000Z", NOW_MS, true), "59分")
+  assert.equal(countdownText("2026-11-11T11:00:00.000Z", NOW_MS, true), "1时0分")
+  assert.equal(countdownText("2026-11-13T12:00:00.000Z", NOW_MS, true), "2天2时")
+  assert.equal(promotionText(activeModel(), ACTIVE_NOW_MS, true), "低峰30分后恢复0.50x")
+  assert.equal(promotionText(upcomingModel(), UPCOMING_NOW_MS, true), "1时0分后错峰4折")
+})
+
 test("a missing or invalid window only shows the current factor", () => {
   const noWindow = { modelKey: "GLM-5.3", priceFactor: 0.5, promotion: { active: true } }
   assert.equal(promotionText(noWindow, NOW_MS), "")
@@ -191,7 +199,7 @@ test("the panel shows each model factor, the active countdown and the update tim
   const lines = pricingPanelLines({ pricing: snapshot([activeModel(), { modelKey: "Auto", priceFactor: 1 }]), nowMs: ACTIVE_NOW_MS, collapsed: false })
   assert.deepEqual(lines.slice(0, 3), [
     { tone: "base", text: "模型倍率 ▾", action: "toggle-pricing" },
-    { tone: "muted", text: "GLM-5.3 0.10x 低峰 · 30 分后恢复 0.50x" },
+    { tone: "muted", text: "GLM-5.3 0.10x 低峰30分后恢复0.50x" },
     { tone: "muted", text: "Auto 1.00x" },
   ])
   assert.equal(lines.length, 4)
@@ -220,13 +228,13 @@ test("the collapsed panel keeps one header line with the valid model count", () 
 
 test("the panel renders the upcoming low-peak state with its badge", () => {
   const lines = pricingPanelLines({ pricing: snapshot([upcomingModel()]), nowMs: UPCOMING_NOW_MS, collapsed: false })
-  assert.equal(lines[1]!.text, "GLM-5.3 0.50x 1 小时 0 分后进入错峰 4 折")
+  assert.equal(lines[1]!.text, "GLM-5.3 0.50x 1时0分后错峰4折")
 })
 
 test("the panel omits the update line when fetchedAt is invalid", () => {
   const lines = pricingPanelLines({ pricing: snapshot([activeModel()], { fetchedAt: "garbage" }), nowMs: ACTIVE_NOW_MS, collapsed: false })
   assert.equal(lines.length, 2)
-  assert.equal(lines[1]!.text, "GLM-5.3 0.10x 低峰 · 30 分后恢复 0.50x")
+  assert.equal(lines[1]!.text, "GLM-5.3 0.10x 低峰30分后恢复0.50x")
 })
 
 test("the status summary reports an active or an upcoming daily window", () => {

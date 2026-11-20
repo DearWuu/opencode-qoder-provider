@@ -80,11 +80,14 @@ test("the quota method exposes real values plus source, cache and error metadata
     additionalProperties: false,
   })
   const fields = ["available", "source", "used", "total", "remaining", "percentage", "expiresAt", "fetchedAt", "cached", "error"]
-  assert.deepEqual(Object.keys(method.output.properties), fields)
+  assert.deepEqual(Object.keys(method.output.properties), [...fields, "quotas"])
   assert.deepEqual(method.output.required, fields)
   assert.equal(method.output.properties.available.type, "boolean")
   assert.equal(method.output.properties.percentage.type, "integer")
   assert.equal(method.output.additionalProperties, false)
+  const entry = method.output.properties.quotas.items
+  assert.deepEqual(entry.required, ["label", "name", "used", "total", "remaining", "percentage"])
+  assert.equal(entry.additionalProperties, false)
 })
 
 test("the pricing method returns the snapshot contract or null", () => {
