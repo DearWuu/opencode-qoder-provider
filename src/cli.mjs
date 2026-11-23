@@ -1,8 +1,9 @@
 /**
- * 文件职责：spawn Qoder CLI、把图片附件落成临时文件并以 `--attachment` 传入、写入 stdin、按字节上限收集输出、超时/中断时终止整个进程树；
+ * 文件职责：spawn Qoder CLI、把图片附件落成临时文件并以 `--attachment` 传入、把 `--append-system-prompt`
+ * 的内联文本落成 `--append-system-prompt-file` 临时文件、写入 stdin、按字节上限收集输出、超时/中断时终止整个进程树；
  * 工具桥接模式在参数层追加 `--append-system-prompt` / `--strict-mcp-config` / `--tools ""`。
  * 上游：src/provider.execute、src/catalog（`--list-models` / `--version`）。
- * 下游：node:child_process、node:fs/os/path（附件临时目录）。
+ * 下游：node:child_process、node:fs/os/path（临时目录）。
  */
 import { spawn } from "node:child_process"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
@@ -57,6 +58,8 @@ const ATTACHMENT_EXTENSIONS = {
  *
  * 参数顺序固定为：常规参数 → `--append-system-prompt` → `--reasoning-effort` →
  * `--strict-mcp-config` → `--add-dir` → 附件（`runCli` 插入）→ `--tools ""` 收尾。
+ * `runCli` 在 spawn 前把这一对参数原位改写成 `--append-system-prompt-file <path>`（临时文件），
+ * 位置不变，避免内联长文本撞上 Windows 32K 命令行上限。
  *
  * @param {{ modelID?: string, cwd?: string, permissionMode?: string, additionalDirs?: string[], cliTools?: string[] | "", maxOutputTokens?: number, stream?: boolean, bridge?: boolean, appendSystemPrompt?: string, reasoningEffort?: string }} [options]
  * @returns {string[]}
@@ -127,6 +130,8 @@ export function resolveSpawnCommand(cliPath, args, platform = process.platform) 
  * 调用方：src/provider.execute、src/catalog（`--list-models` / `--version`）。
  *
  * `attachments` 里的每个图片在 spawn 前写成临时文件并追加 `--attachment <path>`；
+ * `--append-system-prompt <text>` 在 spawn 前原位改写成 `--append-system-prompt-file <path>`，
+ * 文本写进同一个临时目录（无附件时也新建），避免大段系统提示词撞上 Windows 32K 命令行上限。
  * 临时目录在成功、失败、超时、中断四条路径上都会删除（`finally` 语义）。
  *
  * @param {object} [options]
@@ -146,11 +151,11 @@ export function resolveSpawnCommand(cliPath, args, platform = process.platform) 
  * @returns {Promise<{ code: number|null, stdout: string, stderr: string, durationMs: number, timedOut: boolean, timeoutKind: "idle"|"total"|undefined, aborted: boolean, stdoutTruncated: boolean, stderrTruncated: boolean, lastEventType: string, lastEventAgoMs: number, sawStdout: boolean, sawStderr: boolean }>}
  */
 export async function runCli({ cliPath, args, attachments = [], input, cwd, timeoutMs, idleTimeoutMs, signal, onStdout, collectStdout = true, env = process.env } = {}) {
-  const prepared = materializeAttachments(attachments)
+  const prepared = prepareInvocation(args, attachments)
   try {
     return await spawnCli({
       cliPath,
-      args: appendAttachmentArgs(args, prepared.paths),
+      args: prepared.args,
       input,
       cwd,
       timeoutMs,
@@ -161,11 +166,11 @@ export async function runCli({ cliPath, args, attachments = [], input, cwd, time
       env,
     })
   } finally {
-    removeAttachmentDir(prepared.dir)
+    removeTempDir(prepared.dir)
   }
 }
 
-/** spawn 并等待退出；附件临时目录由调用方 `runCli` 的 `finally` 删除。 */
+/** spawn 并等待退出；临时目录由调用方 `runCli` 的 `finally` 删除。 */
 function spawnCli({ cliPath, args, input, cwd, timeoutMs, idleTimeoutMs, signal, onStdout, collectStdout, env }) {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now()
@@ -369,30 +374,55 @@ function tryParse(value) {
 }
 
 /**
- * 把图片附件写成系统临时目录里的文件。
+ * spawn 前准备本次调用的临时目录与参数。
  *
- * 每次调用一个独立目录（`mkdtemp`），文件名按附件顺序编号，扩展名由 mediaType 决定，
- * 未知类型用 `.bin` 交给 CLI 按内容识别。
+ * `--append-system-prompt <text>` 原位改写成 `--append-system-prompt-file <path>`：大段系统提示词
+ * 留在文件里，避免 Windows 32K 命令行上限（ENAMETOOLONG）。附件与系统提示词共用一个 `mkdtemp`
+ * 目录；两者都没有时不建目录。
  *
+ * @param {string[]} args
  * @param {Array<{ mediaType?: string, data: Uint8Array | string }>} attachments
- * @returns {{ dir: string | undefined, paths: string[] }}
+ * @returns {{ dir: string | undefined, args: string[] }}
  */
-function materializeAttachments(attachments) {
-  if (!Array.isArray(attachments) || attachments.length === 0) return { dir: undefined, paths: [] }
+function prepareInvocation(args, attachments) {
+  const preparedArgs = Array.isArray(args) ? [...args] : []
+  const systemIndex = preparedArgs.indexOf("--append-system-prompt")
+  const hasAttachments = Array.isArray(attachments) && attachments.length > 0
+  if (systemIndex < 0 && !hasAttachments) return { dir: undefined, args: preparedArgs }
   const dir = mkdtempSync(join(tmpdir(), "qoder-attachments-"))
   try {
-    const paths = attachments.map((attachment, index) => {
-      const mediaType = String(attachment?.mediaType ?? "").trim().toLowerCase()
-      const extension = ATTACHMENT_EXTENSIONS[mediaType] ?? ".bin"
-      const path = join(dir, `attachment-${index}${extension}`)
-      writeFileSync(path, attachmentBuffer(attachment?.data))
-      return path
-    })
-    return { dir, paths }
+    if (systemIndex >= 0) {
+      const text = String(preparedArgs[systemIndex + 1] ?? "")
+      const path = join(dir, "append-system-prompt.md")
+      writeFileSync(path, text)
+      preparedArgs.splice(systemIndex, systemIndex + 1 < preparedArgs.length ? 2 : 1, "--append-system-prompt-file", path)
+    }
+    const paths = materializeAttachments(dir, attachments)
+    return { dir, args: appendAttachmentArgs(preparedArgs, paths) }
   } catch (error) {
-    removeAttachmentDir(dir)
+    removeTempDir(dir)
     throw error
   }
+}
+
+/**
+ * 把图片附件写成 `dir` 里的文件。
+ *
+ * 文件名按附件顺序编号，扩展名由 mediaType 决定，未知类型用 `.bin` 交给 CLI 按内容识别。
+ *
+ * @param {string} dir 本次调用的临时目录。
+ * @param {Array<{ mediaType?: string, data: Uint8Array | string }>} attachments
+ * @returns {string[]}
+ */
+function materializeAttachments(dir, attachments) {
+  if (!Array.isArray(attachments) || attachments.length === 0) return []
+  return attachments.map((attachment, index) => {
+    const mediaType = String(attachment?.mediaType ?? "").trim().toLowerCase()
+    const extension = ATTACHMENT_EXTENSIONS[mediaType] ?? ".bin"
+    const path = join(dir, `attachment-${index}${extension}`)
+    writeFileSync(path, attachmentBuffer(attachment?.data))
+    return path
+  })
 }
 
 function attachmentBuffer(data) {
@@ -417,7 +447,7 @@ function appendAttachmentArgs(args, paths) {
   return finalArgs
 }
 
-function removeAttachmentDir(dir) {
+function removeTempDir(dir) {
   if (!dir) return
   try {
     rmSync(dir, { recursive: true, force: true })

@@ -56,6 +56,22 @@ function record(payload) {
 }
 
 /**
+ * Read the `--append-system-prompt-file <path>` file the provider materialized,
+ * so tests can assert the argv wiring and the exact text. The provider removes
+ * the temp dir once the run finishes, so the read has to happen here.
+ */
+function readSystemPromptFile() {
+  const index = argv.indexOf("--append-system-prompt-file")
+  if (index < 0) return undefined
+  const path = argv[index + 1]
+  try {
+    return { path, content: readFileSync(path, "utf8") }
+  } catch {
+    return { path, error: "unreadable" }
+  }
+}
+
+/**
  * Read every `--attachment <path>` file the provider materialized, so tests can
  * assert both the argv wiring and the exact bytes on disk. `readable: false`
  * records a path the CLI could not open.
@@ -310,7 +326,13 @@ if (argv.includes("--list-models")) {
     stdin += chunk
   })
   process.stdin.on("end", () => {
-    record({ argv, stdin, stdinBytes: Buffer.byteLength(stdin, "utf8"), attachments: readAttachments() })
+    record({
+      argv,
+      stdin,
+      stdinBytes: Buffer.byteLength(stdin, "utf8"),
+      attachments: readAttachments(),
+      systemPrompt: readSystemPromptFile(),
+    })
 
     if (mode === "hang") {
       spawnTrackedChild()

@@ -370,10 +370,9 @@ test("doGenerate bridges host function tools through the text protocol", async (
 
     const recorded = JSON.parse(readFileSync(record, "utf8"))
     const argv: string[] = recorded.argv
-    const appendIndex = argv.indexOf("--append-system-prompt")
-    assert.ok(appendIndex >= 0)
-    const appended = argv[appendIndex + 1]!
-    // 宿主 system 消息走 --append-system-prompt，不再混进 stdin 的用户文本。
+    // 宿主 system 消息落成 --append-system-prompt-file 临时文件，不再混进 stdin 的用户文本。
+    assert.equal(argv.includes("--append-system-prompt"), false)
+    const appended = recorded.systemPrompt.content as string
     assert.match(appended, /^be brief\n\n/)
     assert.match(appended, /<tool_call>\{"name": "<tool name>", "arguments": \{\.\.\.\}\}<\/tool_call>/)
     assert.match(appended, /- bash: Run a shell command/)
@@ -407,8 +406,9 @@ test("doGenerate keeps the old behaviour when toolBridge is disabled", async () 
     const argv = (JSON.parse(readFileSync(record, "utf8")) as { argv: string[] }).argv
     assert.equal(argv.includes("--strict-mcp-config"), false)
     assert.equal(argv.includes("--tools"), false)
-    // system 仍然单独走 --append-system-prompt，但不含工具协议。
-    assert.equal(argv[argv.indexOf("--append-system-prompt") + 1], "be brief")
+    // system 仍然单独走 --append-system-prompt-file，但不含工具协议。
+    const recordedFull = JSON.parse(readFileSync(record, "utf8"))
+    assert.equal(recordedFull.systemPrompt.content, "be brief")
   })
 })
 
@@ -470,10 +470,12 @@ for (const variant of ["qodercn", "qoder"] as const) {
       assert.deepEqual(result.content.map((part: { type: string }) => part.type), ["text", "tool-call", "tool-call"])
       assert.deepEqual(result.finishReason, { unified: "tool-calls", raw: "end_turn" })
 
-      const argv = (JSON.parse(readFileSync(record, "utf8")) as { argv: string[] }).argv
+      const recordedReply = JSON.parse(readFileSync(record, "utf8"))
+      const argv = recordedReply.argv as string[]
       assert.equal(argv.includes("--strict-mcp-config"), true)
       assert.deepEqual(argv.slice(argv.indexOf("--tools")), ["--tools", ""])
-      assert.match(argv[argv.indexOf("--append-system-prompt") + 1]!, /must call at least one tool/)
+      assert.equal(argv.includes("--append-system-prompt"), false)
+      assert.match(recordedReply.systemPrompt.content, /must call at least one tool/)
     })
   })
 }
@@ -508,9 +510,11 @@ test("doGenerate forwards the reasoning effort and the visible output constraint
   await withFakeEnv({ FAKE_QODER_RECORD: record }, async () => {
     await model.doGenerate({ prompt: PROMPT, providerOptions: { qodercn: { reasoningEffort: "xhigh" } } })
   })
-  const argv = (JSON.parse(readFileSync(record, "utf8")) as { argv: string[] }).argv
+  const recorded = JSON.parse(readFileSync(record, "utf8"))
+  const argv = recorded.argv as string[]
   assert.equal(argv[argv.indexOf("--reasoning-effort") + 1], "xhigh")
-  const system = argv[argv.indexOf("--append-system-prompt") + 1]!
+  assert.equal(argv.includes("--append-system-prompt"), false)
+  const system = recorded.systemPrompt.content as string
   assert.ok(system.startsWith("be brief\n\n# Visible output constraints"))
   assert.ok(system.includes(OUTPUT_CONSTRAINT))
 })

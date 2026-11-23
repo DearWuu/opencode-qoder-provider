@@ -143,6 +143,34 @@ test("the CLI receives the prompt as plain text on stdin", async () => {
   assert.deepEqual(recorded.argv.slice(0, 3), ["-p", "-o", "json"])
 })
 
+test("runCli rewrites --append-system-prompt into --append-system-prompt-file and removes the temp dir", async () => {
+  const dir = tempDir()
+  const record = join(dir, "record.json")
+  const systemPrompt = "tool bridge protocol line\n".repeat(2000)
+  const args = buildCliArgs({ modelID: "Auto", bridge: true, appendSystemPrompt: systemPrompt })
+  const originalIndex = args.indexOf("--append-system-prompt")
+
+  const run = await runCli({
+    cliPath: FAKE_CLI,
+    args,
+    input: "hi",
+    cwd: dir,
+    timeoutMs: 20_000,
+    env: { ...process.env, FAKE_QODER_RECORD: record },
+  })
+
+  assert.equal(run.code, 0)
+  const recorded = JSON.parse(readFileSync(record, "utf8"))
+  // 内联文本不再出现在命令行里，只留文件路径。
+  assert.equal(recorded.argv.includes("--append-system-prompt"), false)
+  const fileIndex = recorded.argv.indexOf("--append-system-prompt-file")
+  assert.equal(fileIndex, originalIndex, "--append-system-prompt-file must keep the original flag position")
+  assert.match(recorded.systemPrompt.path, /append-system-prompt\.md$/)
+  assert.equal(recorded.systemPrompt.content, systemPrompt)
+  // 运行结束后临时目录整体删除。
+  assert.equal(existsSync(dirname(recorded.systemPrompt.path)), false)
+})
+
 test("parseCliResult reads the JSON document out of the CLI output", () => {
   const parsed = parseCliResult('warning line\n{"type":"result","result":"hello"}\n')
   assert.equal(parsed.type, "result")

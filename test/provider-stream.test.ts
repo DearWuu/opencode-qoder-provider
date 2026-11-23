@@ -150,7 +150,8 @@ test("doStream bridges host function tools: split envelopes become tool-call par
     const argv: string[] = recorded.argv
     assert.equal(argv.includes("--strict-mcp-config"), true)
     assert.deepEqual(argv.slice(argv.indexOf("--tools")), ["--tools", ""])
-    assert.match(argv[argv.indexOf("--append-system-prompt") + 1]!, /- bash: Run a shell command/)
+    assert.equal(argv.includes("--append-system-prompt"), false)
+    assert.match(recorded.systemPrompt.content, /- bash: Run a shell command/)
 
     const logged = readLogged(logFile)
     assert.equal(logged[0]!.bridge, true)
@@ -449,8 +450,13 @@ test("doStream appends OUTPUT_CONSTRAINT before the tool protocol and forwards t
       // 排空
     }
   })
-  const argv = (JSON.parse(readFileSync(record, "utf8")) as { argv: string[] }).argv
-  const system = argv[argv.indexOf("--append-system-prompt") + 1]!
+  const recorded = JSON.parse(readFileSync(record, "utf8")) as {
+    argv: string[]
+    systemPrompt: { path: string; content: string }
+  }
+  const argv = recorded.argv
+  assert.equal(argv.includes("--append-system-prompt"), false)
+  const system = recorded.systemPrompt.content
   assert.ok(system.startsWith("be brief\n\n"))
   assert.ok(system.includes(OUTPUT_CONSTRAINT))
   const constraintIndex = system.indexOf("# Visible output constraints")
